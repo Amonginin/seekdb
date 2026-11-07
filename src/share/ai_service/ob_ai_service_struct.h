@@ -56,6 +56,10 @@ public:
   int deep_copy(common::ObIAllocator &allocator, const ObAiModelEndpointInfo &other);
   int check_valid() const;
 
+  /// Whether the endpoint is served by Ollama, which runs a model on the
+  /// machine itself and asks for no access key.
+  bool is_ollama_provider() const { return provider_.case_compare("OLLAMA") == 0; }
+
   const ObString &get_name() const { return name_; }
   const ObString &get_scope() const { return scope_; }
   const ObString &get_url() const { return url_; }
