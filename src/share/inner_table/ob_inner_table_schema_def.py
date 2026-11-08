@@ -2468,6 +2468,69 @@ def_table_schema(**all_objauth_mysql_def)
 def_table_schema(**gen_history_table_def(1134, all_objauth_mysql_def))
 
 
+
+all_ai_column_def = dict(
+    owner = 'competition',
+    table_name = '__all_ai_column',
+    table_id = '1135',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+      ('table_id', 'int'),
+      ('column_id', 'int')
+    ],
+
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('column_name', 'varchar:128', 'false'),
+        ('ai_column_type', 'int', 'false'),
+        ('model_name', 'varchar:128', 'false'),
+        ('expr_text', 'varchar:4096', 'true'),
+        ('normalized_expr', 'varchar:8192', 'true'),
+        ('result_type', 'int', 'false'),
+        ('vector_dim', 'int', 'true'),
+        ('sync_mode', 'varchar:16', 'false'),
+        ('max_retries', 'int', 'false'),
+        ('state_column_id', 'int', 'false'),
+        ('request_column_id', 'int', 'false'),
+        ('result_spec_column_id', 'int', 'false'),
+        ('status', 'int', 'false')
+  ]
+)
+def_table_schema(**all_ai_column_def)
+
+all_ai_column_task_def = dict(
+    owner = 'competition',
+    table_name = '__all_ai_column_task',
+    table_id = '1136',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+      ('table_id', 'int'),
+      ('request_id', 'varchar:64'),
+      ('column_id', 'int')
+    ],
+
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('column_name', 'varchar:128', 'false'),
+        ('rowkey_predicate', 'varchar:1024', 'true'),
+        ('database_name', 'varchar:128', 'true'),
+        ('table_name', 'varchar:128', 'true'),
+        ('state', 'int', 'false'),
+        ('retry_count', 'int', 'false'),
+        ('eligible_ts', 'timestamp', 'true'),
+        ('lease_owner', 'varchar:64', 'true'),
+        ('lease_ts', 'timestamp', 'true'),
+        ('last_error', 'varchar:1024', 'true'),
+        ('prompt_sql', 'varchar:4096', 'true')
+  ]
+)
+def_table_schema(**all_ai_column_task_def)
+
+
 # Reserved position (placeholder before this line)
 # Placeholder suggestion for this section: Use actual table names for placeholders
 ################################################################################
