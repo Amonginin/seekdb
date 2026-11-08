@@ -6269,11 +6269,12 @@ ai_column_with_opt:
 ai_column_option_list:
 ai_column_option
 {
-  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION_LIST, 1, $1);
+  $$ = $1;
 }
 | ai_column_option_list ',' ai_column_option
 {
-  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION_LIST, 2, $1, $3);
+  /* A link node is flattened by merge_nodes, so the option list stays flat. */
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
 }
 ;
 

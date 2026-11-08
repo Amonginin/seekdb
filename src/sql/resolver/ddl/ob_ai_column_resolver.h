@@ -66,6 +66,14 @@ public:
                               common::ObString &sync_mode,
                               int64_t &max_retries);
 
+  // Reads one option node and walks the option list.
+  static int parse_one_option(ParseNode *opt,
+                              common::ObString &sync_mode,
+                              int64_t &max_retries);
+  static int collect_ai_options(ParseNode *node,
+                                common::ObString &sync_mode,
+                                int64_t &max_retries);
+
   // Rebuilds a readable expression text out of the parse tree. The result is
   // only meant for storage and diagnostics, not for re-execution.
   static int build_expr_text(common::ObIAllocator &allocator,

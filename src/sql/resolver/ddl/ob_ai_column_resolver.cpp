@@ -243,6 +243,70 @@ int ObAiColumnResolver::parse_ai_expr(common::ObIAllocator &allocator,
   return ret;
 }
 
+// Reads one option node: the key is the first child, the value the second one.
+int ObAiColumnResolver::parse_one_option(ParseNode *opt,
+                                         common::ObString &sync_mode,
+                                         int64_t &max_retries)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(opt) || opt->type_ != T_AI_COLUMN_OPTION || opt->num_child_ < 2) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected ai column option", K(ret));
+  } else {
+    ParseNode *key = opt->children_[0];
+    ParseNode *value = opt->children_[1];
+    if (OB_ISNULL(key) || OB_ISNULL(key->str_value_) || OB_ISNULL(value)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected ai column option content", K(ret));
+    } else {
+      common::ObString opt_name(key->str_len_, key->str_value_);
+      if (0 == opt_name.compare(ObString::make_string("sync_mode"))) {
+        if (OB_ISNULL(value->str_value_)) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN sync_mode must be a string");
+        } else {
+          sync_mode = common::ObString(value->str_len_, value->str_value_);
+        }
+      } else if (0 == opt_name.compare(ObString::make_string("max_retries"))) {
+        if (OB_ISNULL(value->str_value_)) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN max_retries must be an integer");
+        } else {
+          max_retries = strtoll(value->str_value_, NULL, 10);
+          if (max_retries < 0) {
+            ret = OB_NOT_SUPPORTED;
+            LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN max_retries must not be negative");
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+// Walks the option list. The grammar builds a left recursive list, so the
+// options may sit behind link nodes; they are visited recursively.
+int ObAiColumnResolver::collect_ai_options(ParseNode *node,
+                                            common::ObString &sync_mode,
+                                            int64_t &max_retries)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(node)) {
+    // nothing to do
+  } else if (node->type_ == T_AI_COLUMN_OPTION) {
+    ret = parse_one_option(node, sync_mode, max_retries);
+  } else if (node->type_ == T_LINK_NODE || node->type_ == T_AI_COLUMN_OPTION_LIST) {
+    for (int32_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
+      if (OB_FAIL(collect_ai_options(node->children_[i], sync_mode, max_retries))) {
+      }
+    }
+  } else {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected ai column option node", K(ret), K(node->type_));
+  }
+  return ret;
+}
+
 int ObAiColumnResolver::parse_ai_options(ParseNode *option_node,
                                           common::ObString &sync_mode,
                                           int64_t &max_retries)
@@ -251,53 +315,10 @@ int ObAiColumnResolver::parse_ai_options(ParseNode *option_node,
   max_retries = 0;
   if (OB_ISNULL(option_node)) {
     // no options, the defaults stay in place
-  } else if (option_node->type_ != T_AI_COLUMN_OPTION_LIST) {
-    ObAiDiag::trace("AI parse_opts: option_node type=%d expected=%d\n",
-                    (int)option_node->type_, (int)T_AI_COLUMN_OPTION_LIST);
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("unexpected ai column option node", K(ret), K(option_node->type_));
   } else {
-    ObAiDiag::trace("AI parse_opts: option_list type=%d cnt=%d\n",
+    ObAiDiag::trace("AI parse_opts: option_node type=%d cnt=%d\n",
                     (int)option_node->type_, option_node->num_child_);
-    for (int32_t i = 0; OB_SUCC(ret) && i < option_node->num_child_; ++i) {
-      ParseNode *opt = option_node->children_[i];
-      ObAiDiag::trace("AI parse_opts: opt[%d]=%p type=%d num_child=%d\n",
-                      i, (void *)opt, opt ? (int)opt->type_ : -1,
-                      opt ? opt->num_child_ : -1);
-      if (OB_ISNULL(opt) || opt->type_ != T_AI_COLUMN_OPTION || opt->num_child_ < 2) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("unexpected ai column option", K(ret));
-        break;
-      }
-      ParseNode *key = opt->children_[0];
-      ParseNode *value = opt->children_[1];
-      if (OB_ISNULL(key) || OB_ISNULL(key->str_value_) || OB_ISNULL(value)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("unexpected ai column option content", K(ret));
-        break;
-      }
-      common::ObString opt_name(key->str_len_, key->str_value_);
-      if (0 == opt_name.compare(ObString::make_string("sync_mode"))) {
-        if (OB_ISNULL(value->str_value_)) {
-          ret = OB_NOT_SUPPORTED;
-          LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN sync_mode must be a string");
-          break;
-        }
-        sync_mode = common::ObString(value->str_len_, value->str_value_);
-      } else if (0 == opt_name.compare(ObString::make_string("max_retries"))) {
-        if (OB_ISNULL(value->str_value_)) {
-          ret = OB_NOT_SUPPORTED;
-          LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN max_retries must be an integer");
-          break;
-        }
-        max_retries = strtoll(value->str_value_, NULL, 10);
-        if (max_retries < 0) {
-          ret = OB_NOT_SUPPORTED;
-          LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN max_retries must not be negative");
-          break;
-        }
-      }
-    }
+    ret = collect_ai_options(option_node, sync_mode, max_retries);
   }
   return ret;
 }
