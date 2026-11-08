@@ -10,3 +10,6 @@
 *.i filter=codeformat
 *.ic filter=codeformat
 *.js filter=codeformat
+# Shell scripts must stay LF: they are executed on the Linux competition
+# instance and CRLF breaks the shebang.
+tools/comp_recover.sh text eol=lf
