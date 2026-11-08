@@ -4840,6 +4840,20 @@ column_definition_ref data_type opt_column_attribute_list opt_column_reference o
   set_data_type_collation($2, attributes, false, true);
   malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 4, $1, $2, attributes, $5);
 }
+| column_definition_ref data_type AI COLUMN '(' expr ')' ai_column_with_opt opt_position_column
+{
+  // An AI column: the value is produced by an AI function rather than written
+  // by the client. Keeping the rule here (instead of in column_attribute)
+  // avoids the ambiguity of an optional attribute list where AI can also be a
+  // column name. The definition travels as the column's only attribute so the
+  // DDL resolver sees the same shape as every other column attribute.
+  ParseNode *ai_attr = NULL;
+  ParseNode *attributes = NULL;
+  malloc_non_terminal_node(ai_attr, result->malloc_pool_, T_AI_COLUMN_DEFINITION, 2, $6, $8);
+  merge_nodes(attributes, result, T_COLUMN_ATTRIBUTES, ai_attr);
+  set_data_type_collation($2, attributes, false, true);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 4, $1, $2, attributes, $9);
+}
 | column_definition_ref data_type opt_collation opt_generated_keyname AS '(' expr ')' opt_storage_type opt_generated_column_attribute_list opt_column_reference opt_position_column
 {
   (void)($11);
@@ -6238,13 +6252,6 @@ not NULLX
 | INVISIBLE
 {
   malloc_terminal_node($$, result->malloc_pool_, T_INVISIBLE);
-}
-| AI COLUMN '(' expr ')' ai_column_with_opt
-{
-  // A generated column whose value comes from an AI function call. The AI
-  // expression and the optional WITH(...) clause stay as children; the DDL
-  // resolver turns them into column metadata and hidden state columns.
-  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_DEFINITION, 2, $4, $6);
 }
 ;
 
