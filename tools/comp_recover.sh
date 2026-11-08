@@ -204,10 +204,9 @@ stage_build() {
   log "阶段 2/3：编译（release）"
   cd "${SRC_DIR}" || die "找不到 ${SRC_DIR}"
 
-  # 拉最新代码（只切文件，不动分支历史）
+  # 拉最新代码（含新增文件；不动分支历史）
   git fetch origin 2026-competition 2>&1 | tail -2
-  git checkout FETCH_HEAD -- src/ 2>/dev/null || true
-  git checkout FETCH_HEAD -- tools/ 2>/dev/null || true
+  git checkout FETCH_HEAD -- src/ tools/ deps/ 2>/dev/null || true
   git log --oneline -1
 
   pkill -f "seekdb --base-dir" 2>/dev/null; sleep 2
