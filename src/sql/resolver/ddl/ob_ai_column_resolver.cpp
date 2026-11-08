@@ -126,7 +126,7 @@ int build_node_text(common::ObIAllocator &allocator,
 // Collects the names of the columns an AI expression references.
 int collect_column_refs(common::ObIAllocator &allocator,
                         ParseNode *node,
-                        common::ObSArray<common::ObString, 8> &refs)
+                        common::ObSEArray<common::ObString, 8> &refs)
 {
   int ret = OB_SUCCESS;
   if (OB_ISNULL(node)) {
@@ -328,7 +328,7 @@ int ObAiColumnResolver::check_no_ai_dependency(common::ObIAllocator &allocator,
   if (ai_column_names.count() <= 0) {
     // no AI column to depend on
   } else {
-    common::ObSArray<common::ObString, 8> refs;
+    common::ObSEArray<common::ObString, 8> refs;
     if (OB_FAIL(collect_column_refs(allocator, ai_expr, refs))) {
     } else {
       for (int64_t i = 0; OB_SUCC(ret) && i < refs.count(); ++i) {

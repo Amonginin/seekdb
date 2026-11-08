@@ -2401,7 +2401,7 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
   // An AI column may not reference another AI column of the same table: such a
   // definition cannot be evaluated in a single pass.
   if (OB_SUCC(ret)) {
-    ObSArray<ObString, 8> ai_column_names;
+    ObSEArray<ObString, 8> ai_column_names;
     for (int64_t i = 0; OB_SUCC(ret) && i < table_schema->get_ai_column_count(); ++i) {
       const ObAiColumnSchema *exist = table_schema->get_ai_column(i);
       if (OB_NOT_NULL(exist)) {
