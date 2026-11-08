@@ -420,7 +420,7 @@ END_P SET_VAR DELIMITER
 %type <node> opt_float_precision opt_number_precision
 %type <node> opt_equal_mark opt_default_mark read_only_or_write not not2
 %type <node> int_or_decimal
-%type <node> opt_column_attribute_list column_attribute column_attribute_list opt_column_default_value opt_column_default_value_list
+%type <node> opt_column_attribute_list column_attribute column_attribute_list opt_column_default_value opt_column_default_value_list ai_column_with_opt ai_column_option_list ai_column_option
 %type <node> show_stmt from_or_in columns_or_fields database_or_schema index_or_indexes_or_keys opt_from_or_in_database_clause opt_show_condition opt_desc_column_option opt_status opt_storage opt_show_engine check_table_options check_table_option
 %type <node> prepare_stmt stmt_name preparable_stmt
 %type <node> variable_set_stmt var_and_val_list var_and_val to_or_eq set_expr_or_default sys_var_and_val
@@ -6238,6 +6238,46 @@ not NULLX
 | INVISIBLE
 {
   malloc_terminal_node($$, result->malloc_pool_, T_INVISIBLE);
+}
+| AI COLUMN '(' expr ')' ai_column_with_opt
+{
+  // A generated column whose value comes from an AI function call. The AI
+  // expression and the optional WITH(...) clause stay as children; the DDL
+  // resolver turns them into column metadata and hidden state columns.
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_DEFINITION, 2, $4, $6);
+}
+;
+
+ai_column_with_opt:
+/* empty */
+{
+  $$ = NULL;
+}
+| WITH '(' ai_column_option_list ')'
+{
+  $$ = $3;
+}
+;
+
+ai_column_option_list:
+ai_column_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION_LIST, 1, $1);
+}
+| ai_column_option_list ',' ai_column_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION_LIST, 2, $1, $3);
+}
+;
+
+ai_column_option:
+NAME_OB '=' STRING_VALUE
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION, 2, $1, $3);
+}
+| NAME_OB '=' INTNUM
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION, 2, $1, $3);
 }
 ;
 
