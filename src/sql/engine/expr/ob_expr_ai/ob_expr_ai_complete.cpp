@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
+#include <cstdio>
 #include "ob_expr_ai_complete.h"
 #include "query/ai/ob_ai_endpoint_resolver.h"
 #include "share/rc/ob_server_runtime.h"
@@ -87,11 +88,15 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
                                        ObDatum &res) 
 {
   INIT_SUCC(ret);
+  fprintf(stderr, "[AIDBG] eval_ai_complete enter arg_cnt=%ld\n", static_cast<long>(expr.arg_cnt_));
+  fflush(stderr);
   LOG_ERROR("ai complete entered", K(ret), K(expr.arg_cnt_));
   ObDatum *arg_model_id = nullptr;
   ObDatum *arg_prompt = nullptr;
   ObDatum *arg_config = nullptr;
   if (OB_FAIL(expr.eval_param_value(ctx, arg_model_id, arg_prompt, arg_config))) {
+    fprintf(stderr, "[AIDBG] eval_param_value failed ret=%d\n", ret);
+    fflush(stderr);
     LOG_ERROR("ai complete, failed to evaluate the parameters", K(ret), K(expr.arg_cnt_));
   } else if (arg_model_id->is_null() || arg_prompt->is_null()) {
     ret = OB_INVALID_ARGUMENT;
@@ -169,6 +174,10 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
       }
     }
   }
+  if (OB_FAIL(ret)) {
+    fprintf(stderr, "[AIDBG] eval_ai_complete exit ret=%d\n", ret);
+    fflush(stderr);
+  }
   return ret;
 }
 
@@ -206,6 +215,8 @@ int ObExprAIComplete::cg_expr(ObExprCGCtx &expr_cg_ctx,
   // }
 
   if (OB_SUCC(ret)) {
+    fprintf(stderr, "[AIDBG] cg_expr binds the evaluator\n");
+    fflush(stderr);
     LOG_ERROR("ai complete, cg_expr binds the evaluator", K(ret));
     rt_expr.eval_func_ = ObExprAIComplete::eval_ai_complete;
   }
