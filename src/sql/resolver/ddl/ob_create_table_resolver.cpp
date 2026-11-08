@@ -170,7 +170,7 @@ static int build_ai_hidden_column_name(common::ObIAllocator &allocator,
 // state, the current request id and the result specification of the column.
 int ObCreateTableResolver::add_ai_column_hidden_cols(
     share::schema::ObTableSchema &table_schema,
-    common::ObSEArray<share::schema::ObColumnSchemaV2, 16> &resolved_cols)
+    common::ObSEArray<share::schema::ObColumnSchemaV2, SEARRAY_INIT_NUM> &resolved_cols)
 {
   int ret = OB_SUCCESS;
   for (int64_t i = 0; OB_SUCC(ret) && i < table_schema.get_ai_column_count(); ++i) {
@@ -188,10 +188,10 @@ int ObCreateTableResolver::add_ai_column_hidden_cols(
     common::ObString state_name;
     common::ObString request_name;
     common::ObString spec_name;
-    ObAiColumnSchema *mutable_ai_column = NULL;
-    // The metadata row is updated in place, so the ids of the three hidden
-    // columns can be written back to it.
-    if (OB_FAIL(table_schema.get_ai_column_mut(i, mutable_ai_column))) {
+    ObAiColumnSchema *mutable_ai_column = table_schema.get_ai_column_mut(i);
+    if (OB_ISNULL(mutable_ai_column)) {
+      ret = OB_ERR_UNEXPECTED;
+      SQL_RESV_LOG(WARN, "failed to locate the ai column metadata", K(ret), K(i));
       break;
     }
     HiddenColDef defs[3] = {

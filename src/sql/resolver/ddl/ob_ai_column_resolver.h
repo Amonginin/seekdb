@@ -21,13 +21,12 @@
 #include "lib/string/ob_string.h"
 #include "lib/container/ob_array.h"
 #include "share/schema/ob_table_schema.h"
+#include "sql/parser/parse_node.h"
 
 namespace oceanbase
 {
 namespace sql
 {
-
-struct ParseNode;
 
 /**
  * Helpers that turn the parsed `AI COLUMN (<expr>) WITH (...)` attribute into
