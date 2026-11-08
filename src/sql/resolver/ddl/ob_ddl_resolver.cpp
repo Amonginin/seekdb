@@ -2281,6 +2281,19 @@ int ObDDLResolver::resolve_normal_column_attribute(ObColumnSchemaV2 &column,
         }
         break;
       }
+      case T_AI_COLUMN_DEFINITION: {
+        // An AI column: `col <type> AI COLUMN (<ai function>) WITH (...)`. The
+        // node carries the AI expression and the optional WITH list. Accepting
+        // it here is what keeps the DDL from falling into the default branch
+        // below, which reports OB_ERR_PARSER_SYNTAX; the metadata row and the
+        // three hidden state columns are wired in the following steps.
+        ParseNode *ai_expr = NULL;
+        if (attr_node->num_child_ < 1 || OB_ISNULL(ai_expr = attr_node->children_[0])) {
+          ret = OB_ERR_UNEXPECTED;
+          SQL_RESV_LOG(WARN, "ai column definition carries no expression", K(ret));
+        }
+        break;
+      }
       case T_VISIBLE:
       case T_INVISIBLE:
       {
