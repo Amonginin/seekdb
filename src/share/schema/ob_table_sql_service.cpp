@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SHARE_SCHEMA
 #include "ob_table_sql_service.h"
 #include "lib/literals/ob_literals.h"
+#include "share/ob_ai_diag.h"
 #include "share/ob_global_stat_proxy.h"
 #include "share/schema/ob_constraint.h"
 #include "share/schema/ob_partition_sql_helper.h"

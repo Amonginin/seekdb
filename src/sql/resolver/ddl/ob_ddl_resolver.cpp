@@ -26,7 +26,7 @@
 #include "sql/engine/expr/ob_expr_lob_utils.h"
 #include "sql/rewrite/ob_transform_pre_process.h"
 #include "sql/resolver/ddl/ob_ai_column_resolver.h"
-#include "sql/resolver/ddl/ob_ai_diag.h"
+#include "share/ob_ai_diag.h"
 #include "sql/resolver/ddl/ob_vec_index_builder_util.h"
 #include "sql/resolver/ddl/ob_fts_parser_resolver.h"
 #include "sql/session/ob_local_session_var.h"
@@ -2288,7 +2288,10 @@ int ObDDLResolver::resolve_normal_column_attribute(ObColumnSchemaV2 &column,
         // The node carries the AI expression and the optional WITH list.
         // The configuration is validated here and stored on the table schema
         // so the DDL executor can persist it and create the hidden columns.
+        ObAiDiag::trace("AI resolver: T_AI_COLUMN_DEFINITION branch, attr=%p num_child=%d\n",
+                        (void *)attr_node, attr_node ? attr_node->num_child_ : -1);
         if (OB_FAIL(resolve_ai_column_attribute(column, attr_node))) {
+          ObAiDiag::trace("AI resolver: resolve_ai_column_attribute failed ret=%d\n", ret);
         }
         break;
       }
