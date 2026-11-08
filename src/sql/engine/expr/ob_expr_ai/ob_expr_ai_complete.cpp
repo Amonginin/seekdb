@@ -87,10 +87,12 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
                                        ObDatum &res) 
 {
   INIT_SUCC(ret);
+  LOG_ERROR("ai complete entered", K(ret), K(expr.arg_cnt_));
   ObDatum *arg_model_id = nullptr;
   ObDatum *arg_prompt = nullptr;
   ObDatum *arg_config = nullptr;
   if (OB_FAIL(expr.eval_param_value(ctx, arg_model_id, arg_prompt, arg_config))) {
+    LOG_ERROR("ai complete, failed to evaluate the parameters", K(ret), K(expr.arg_cnt_));
   } else if (arg_model_id->is_null() || arg_prompt->is_null()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete, parameters is null");
@@ -149,20 +151,21 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
 
     if (OB_FAIL(ret)){
     } else if (OB_FAIL(ObAIFuncUtils::get_ai_func_info(temp_allocator, model_id, info))) {
-      LOG_WARN("ai complete, failed to get the model info", K(ret), K(model_id));
+      LOG_ERROR("ai complete, failed to get the model info", K(ret), K(model_id));
     } else if (OB_ISNULL(endpoint_resolver)) {
       ret = OB_ERR_UNEXPECTED;
+      LOG_ERROR("ai complete, the endpoint resolver is null", K(ret));
     } else if (OB_FAIL(endpoint_resolver->resolve_by_model_name(
                    model_id, temp_allocator, resolved_endpoint))) {
-      LOG_WARN("ai complete, failed to resolve the endpoint", K(ret), K(model_id));
+      LOG_ERROR("ai complete, failed to resolve the endpoint", K(ret), K(model_id));
     } else {
       ObAIFuncModel model(temp_allocator, *info, *endpoint_info);
       ObString result;
       if (OB_FAIL(model.call_completion(prompt, config, result))) {
-        LOG_WARN("ai complete, failed to call the model", K(ret));
+        LOG_ERROR("ai complete, failed to call the model", K(ret));
       } else if (OB_FAIL(ObAIFuncUtils::set_string_result(expr, ctx, res, result))) {
-        LOG_WARN("ai complete, failed to write the result back", K(ret),
-                 K(result.length()), KP(result.ptr()));
+        LOG_ERROR("ai complete, failed to write the result back", K(ret),
+                  K(result.length()), KP(result.ptr()));
       }
     }
   }
@@ -203,6 +206,7 @@ int ObExprAIComplete::cg_expr(ObExprCGCtx &expr_cg_ctx,
   // }
 
   if (OB_SUCC(ret)) {
+    LOG_ERROR("ai complete, cg_expr binds the evaluator", K(ret));
     rt_expr.eval_func_ = ObExprAIComplete::eval_ai_complete;
   }
   return ret;
