@@ -207,7 +207,6 @@ int ObAiColumnResolver::parse_ai_expr(common::ObIAllocator &allocator,
                 }
                 if (OB_SUCC(ret)) {
                   ret = build_expr_text(allocator, ai_expr, expr_text);
-                }
               }
             }
           }
