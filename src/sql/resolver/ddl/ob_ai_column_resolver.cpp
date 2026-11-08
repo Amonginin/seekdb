@@ -107,6 +107,14 @@ int build_node_text(common::ObIAllocator &allocator,
         }
       }
     }
+  } else if (node->type_ == T_COLUMN_REF) {
+    // A column reference carries (relation, table, column); the column name is
+    // the last child.
+    ParseNode *name_node = node->num_child_ > 2 ? node->children_[node->num_child_ - 1] : NULL;
+    if (OB_NOT_NULL(name_node) && OB_NOT_NULL(name_node->str_value_)) {
+      if (OB_FAIL(append_text(allocator, text, name_node->str_value_, name_node->str_len_))) {
+      }
+    }
   } else if (node->type_ == T_FUN_SYS) {
     if (OB_FAIL(build_node_text(allocator, node->children_[0], text))) {
     } else if (OB_FAIL(append_text(allocator, text, "(", 1))) {
