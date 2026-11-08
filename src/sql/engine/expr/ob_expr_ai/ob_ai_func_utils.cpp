@@ -323,20 +323,18 @@ int ObOllamaUtils::ObOllamaComplete::parse_output(common::ObIAllocator &allocato
                                                   common::ObJsonObject *http_response,
                                                   common::ObIJsonBase *&result) 
 {
+  (void)allocator;
   int ret = OB_SUCCESS;
   if (OB_ISNULL(http_response)) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    ObIJsonBase *j_tree = http_response;
-    common::ObString path_text("$.response");
-    ObJsonPath j_path(path_text, &allocator);
-    ObJsonSeekResult hit;
-    if (OB_FAIL(j_path.parse_path())) {
-    } else if (OB_FAIL(j_tree->seek(j_path, j_path.path_node_cnt(), false, false, hit))) {
-    } else if (hit.size() == 0) {
-      ret = OB_ERR_UNEXPECTED;
+    // Read the top-level "response" field directly. Path-based seek reports
+    // OB_ERR_NULL_VALUE (4152) for some response object layouts.
+    ObJsonNode *response_node = http_response->get_value("response");
+    if (OB_ISNULL(response_node)) {
+      ret = OB_INVALID_DATA;
     } else {
-      result = hit[0];
+      result = response_node;
     }
   }
   return ret;
@@ -382,31 +380,21 @@ int ObOllamaUtils::ObOllamaEmbed::parse_output(common::ObIAllocator &allocator,
                                                common::ObJsonObject *http_response,
                                                common::ObIJsonBase *&result) 
 {
+  (void)allocator;
   int ret = OB_SUCCESS;
   if (OB_ISNULL(http_response)) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    ObIJsonBase *j_tree = http_response;
-    common::ObString path_text("$.embeddings");
-    ObJsonPath j_path(path_text, &allocator);
-    ObJsonSeekResult hit;
-    if (OB_FAIL(j_path.parse_path())) {
-    } else if (OB_FAIL(j_tree->seek(j_path, j_path.path_node_cnt(), false, false, hit))) {
-    } else if (hit.size() == 0) {
-      // Some Ollama-compatible services return a singular "embedding" field.
-      // Accept both spellings so the caller works with either mock.
-      common::ObString alt_path_text("$.embedding");
-      ObJsonPath alt_j_path(alt_path_text, &allocator);
-      ObJsonSeekResult alt_hit;
-      if (OB_FAIL(alt_j_path.parse_path())) {
-      } else if (OB_FAIL(j_tree->seek(alt_j_path, alt_j_path.path_node_cnt(), false, false, alt_hit))) {
-      } else if (alt_hit.size() == 0) {
-        ret = OB_ERR_UNEXPECTED;
-      } else {
-        result = alt_hit[0];
-      }
+    // Accept both spellings used by Ollama-compatible services, reading the
+    // top-level fields directly to avoid the path-seek 4152 failure.
+    ObJsonNode *response_node = http_response->get_value("embeddings");
+    if (OB_ISNULL(response_node)) {
+      response_node = http_response->get_value("embedding");
+    }
+    if (OB_ISNULL(response_node)) {
+      ret = OB_ERR_UNEXPECTED;
     } else {
-      result = hit[0];
+      result = response_node;
     }
   }
   return ret;
