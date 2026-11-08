@@ -132,8 +132,15 @@ def build_response(path, body):
         }
 
     if path.endswith("/api/embed"):
-        prompt = str(body.get("prompt", ""))
-        return {"model": body.get("model", "mock-model"), "embedding": deterministic_vector(prompt)}
+        # Ollama names the field "embeddings" and it holds a list.
+        values = body.get("input", "")
+        if not isinstance(values, list):
+            values = [values]
+        dimension = int(body.get("dimensions") or body.get("dimension") or EMBED_DIMENSION)
+        return {
+            "model": body.get("model", "mock-model"),
+            "embeddings": [deterministic_vector(value, dimension) for value in values],
+        }
 
     return None
 
@@ -153,6 +160,10 @@ def serve(port):
             except Exception:
                 body = {}
             parsed = urlparse(self.path)
+            # Every request is kept, so that a test can tell what the server
+            # actually asked for.
+            with open(state_path(port, "requests.jsonl"), "a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"path": parsed.path, "body": body}) + "\n")
             response = build_response(parsed.path, body)
             if response is None:
                 self.send_response(404)
