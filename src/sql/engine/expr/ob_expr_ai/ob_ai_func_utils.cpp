@@ -334,6 +334,8 @@ int ObOllamaUtils::ObOllamaComplete::parse_output(common::ObIAllocator &allocato
     if (OB_ISNULL(response_node)) {
       ret = OB_INVALID_DATA;
     } else {
+      LOG_WARN("ollama complete response node", K(ret), K(response_node->json_type()),
+               K(response_node->get_data_length()), KP(response_node->get_data()));
       result = response_node;
     }
   }
@@ -1313,6 +1315,20 @@ int ObAIFuncModel::call_completion(ObString &prompt, ObJsonObject *config, ObStr
   } else if (OB_FAIL(complete_provider->get_body(*allocator_, request_model_name, prompt_str, prompt, config, body))) {
   } else if (OB_FAIL(client.send_post(*allocator_, endpoint_info_.get_url(), headers, body, response))) {
   } else if (OB_FAIL(complete_provider->parse_output(*allocator_, response, result_base))) {
+  } else if (OB_ISNULL(result_base)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("ai complete, provider returned an empty result", K(ret));
+  } else if (result_base->json_type() == ObJsonNodeType::J_STRING) {
+    // A completion answer is text, so take the characters straight from the
+    // node. This is the same value the printer would emit for a string with
+    // is_quoted = false, and it keeps working when a node reports a non-zero
+    // length together with a null data pointer - a layout the JSON printer
+    // rejects with OB_ERR_NULL_VALUE (4152).
+    ObString text = static_cast<ObJsonString *>(result_base)->get_str();
+    LOG_WARN("ai complete takes the string result directly", K(ret),
+             K(text.length()), KP(text.ptr()), K(result_base->get_data_length()),
+             KP(result_base->get_data()));
+    result = text;
   } else if (OB_FAIL(ObAIFuncJsonUtils::print_json_to_str(*allocator_, result_base, result_str))) {
   } else {
     result = result_str;
