@@ -55,7 +55,10 @@ int append_text(common::ObIAllocator &allocator,
     // nothing to append
   } else {
     const int64_t old_len = text.length();
-    const int64_t new_len = old_len + 1 + length;
+    // A separator is inserted between two pieces of text, so the extra byte
+    // only exists when there is already something in the buffer.
+    const int64_t sep_len = old_len > 0 ? 1 : 0;
+    const int64_t new_len = old_len + sep_len + length;
     char *buf = static_cast<char *>(allocator.alloc(new_len + 1));
     if (OB_ISNULL(buf)) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
@@ -64,7 +67,7 @@ int append_text(common::ObIAllocator &allocator,
         MEMCPY(buf, text.ptr(), old_len);
         buf[old_len] = ' ';
       }
-      MEMCPY(buf + old_len + (old_len > 0 ? 1 : 0), value, length);
+      MEMCPY(buf + old_len + sep_len, value, length);
       buf[new_len] = '\0';
       text.assign_ptr(buf, new_len);
     }
@@ -249,11 +252,18 @@ int ObAiColumnResolver::parse_ai_options(ParseNode *option_node,
   if (OB_ISNULL(option_node)) {
     // no options, the defaults stay in place
   } else if (option_node->type_ != T_AI_COLUMN_OPTION_LIST) {
+    ObAiDiag::trace("AI parse_opts: option_node type=%d expected=%d\n",
+                    (int)option_node->type_, (int)T_AI_COLUMN_OPTION_LIST);
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected ai column option node", K(ret), K(option_node->type_));
   } else {
+    ObAiDiag::trace("AI parse_opts: option_list type=%d cnt=%d\n",
+                    (int)option_node->type_, option_node->num_child_);
     for (int32_t i = 0; OB_SUCC(ret) && i < option_node->num_child_; ++i) {
       ParseNode *opt = option_node->children_[i];
+      ObAiDiag::trace("AI parse_opts: opt[%d]=%p type=%d num_child=%d\n",
+                      i, (void *)opt, opt ? (int)opt->type_ : -1,
+                      opt ? opt->num_child_ : -1);
       if (OB_ISNULL(opt) || opt->type_ != T_AI_COLUMN_OPTION || opt->num_child_ < 2) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("unexpected ai column option", K(ret));
