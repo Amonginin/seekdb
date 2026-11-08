@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
+#include "sql/resolver/ddl/ob_ai_diag.h"
 #include "sql/resolver/ddl/ob_create_table_resolver.h"
 #include "sql/resolver/dml/ob_select_resolver.h"
 #include "sql/resolver/ddl/ob_fts_index_builder_util.h"
@@ -173,6 +174,7 @@ int ObCreateTableResolver::add_ai_column_hidden_cols(
     common::ObSEArray<share::schema::ObColumnSchemaV2, SEARRAY_INIT_NUM> &resolved_cols)
 {
   int ret = OB_SUCCESS;
+  ObAiDiag::trace("AI hidden cols: begin, ai_count=%ld\n", table_schema.get_ai_column_count());
   for (int64_t i = 0; OB_SUCC(ret) && i < table_schema.get_ai_column_count(); ++i) {
     const ObAiColumnSchema *ai_column = table_schema.get_ai_column(i);
     if (OB_ISNULL(ai_column)) {

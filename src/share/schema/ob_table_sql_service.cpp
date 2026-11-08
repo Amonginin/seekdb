@@ -1158,9 +1158,13 @@ int ObTableSqlService::batch_add_ai_columns_for_create_table(common::ObISQLClien
       }
     }
   }
+  ObAiDiag::trace("AI sql service: row_count=%ld\n", row_count);
   if (OB_SUCC(ret) && row_count > 0) {
     if (OB_FAIL(exec_dml(sql_client, OB_ALL_AI_COLUMN_TNAME, dml, row_count))) {
+      ObAiDiag::trace("AI sql service: exec_dml failed ret=%ld\n", ret);
       LOG_WARN("failed to insert ai column metadata", KR(ret), K(row_count));
+    } else {
+      ObAiDiag::trace("AI sql service: exec_dml ok rows=%ld\n", row_count);
     }
   }
   return ret;
