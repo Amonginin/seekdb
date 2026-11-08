@@ -25,6 +25,7 @@
 #include "sql/resolver/dcl/ob_dcl_resolver.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
 #include "sql/rewrite/ob_transform_pre_process.h"
+#include "sql/resolver/ddl/ob_ai_column_resolver.h"
 #include "sql/resolver/ddl/ob_vec_index_builder_util.h"
 #include "sql/resolver/ddl/ob_fts_parser_resolver.h"
 #include "sql/session/ob_local_session_var.h"
@@ -2282,15 +2283,11 @@ int ObDDLResolver::resolve_normal_column_attribute(ObColumnSchemaV2 &column,
         break;
       }
       case T_AI_COLUMN_DEFINITION: {
-        // An AI column: `col <type> AI COLUMN (<ai function>) WITH (...)`. The
-        // node carries the AI expression and the optional WITH list. Accepting
-        // it here is what keeps the DDL from falling into the default branch
-        // below, which reports OB_ERR_PARSER_SYNTAX; the metadata row and the
-        // three hidden state columns are wired in the following steps.
-        ParseNode *ai_expr = NULL;
-        if (attr_node->num_child_ < 1 || OB_ISNULL(ai_expr = attr_node->children_[0])) {
-          ret = OB_ERR_UNEXPECTED;
-          SQL_RESV_LOG(WARN, "ai column definition carries no expression", K(ret));
+        // An AI column: `col <type> AI COLUMN (<ai function>) WITH (...)`.
+        // The node carries the AI expression and the optional WITH list.
+        // The configuration is validated here and stored on the table schema
+        // so the DDL executor can persist it and create the hidden columns.
+        if (OB_FAIL(resolve_ai_column_attribute(column, attr_node))) {
         }
         break;
       }
@@ -2349,6 +2346,110 @@ int ObDDLResolver::resolve_normal_column_attribute(ObColumnSchemaV2 &column,
       }
     }
   }
+  return ret;
+}
+
+int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
+                                                ParseNode *attr_node)
+{
+  int ret = OB_SUCCESS;
+  ParseNode *ai_expr = NULL;
+  ParseNode *option_node = NULL;
+  ObString func_name;
+  ObString model_name;
+  ObString expr_text;
+  ObString sync_mode;
+  ObString normalized_expr;
+  int64_t dim = OB_INVALID_ID;
+  int64_t max_retries = 0;
+  ObAiColumnSchema ai_column;
+  ObTableSchema *table_schema = NULL;
+  ObCreateTableStmt *create_table_stmt = nullptr;
+  ObAlterTableStmt *alter_table_stmt = nullptr;
+
+  if (OB_ISNULL(attr_node) || attr_node->num_child_ < 1
+      || OB_ISNULL(ai_expr = attr_node->children_[0])) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "ai column definition carries no expression", K(ret));
+  } else if (attr_node->num_child_ > 1) {
+    option_node = attr_node->children_[1];
+  }
+
+  if (OB_SUCC(ret)) {
+    if (stmt::T_ALTER_TABLE == stmt_->get_stmt_type()) {
+      alter_table_stmt = static_cast<ObAlterTableStmt*>(stmt_);
+      table_schema = &alter_table_stmt->get_alter_table_arg().alter_table_schema_;
+    } else {
+      create_table_stmt = static_cast<ObCreateTableStmt*>(stmt_);
+      table_schema = &create_table_stmt->get_create_table_arg().schema_;
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(ObAiColumnResolver::parse_ai_expr(*allocator_, ai_expr, func_name,
+                                                  model_name, expr_text, dim))) {
+    } else if (OB_FAIL(ObAiColumnResolver::parse_ai_options(option_node, sync_mode, max_retries))) {
+    }
+  }
+
+  // Only asynchronous AI columns are supported for now.
+  if (OB_SUCC(ret) && !sync_mode.empty() && 0 != sync_mode.compare(ObString::make_string("async"))) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN only supports sync_mode 'async'");
+  }
+
+  // An AI column may not reference another AI column of the same table: such a
+  // definition cannot be evaluated in a single pass.
+  if (OB_SUCC(ret)) {
+    ObSArray<ObString, 8> ai_column_names;
+    for (int64_t i = 0; OB_SUCC(ret) && i < table_schema->get_ai_column_count(); ++i) {
+      const ObAiColumnSchema *exist = table_schema->get_ai_column(i);
+      if (OB_NOT_NULL(exist)) {
+        if (OB_FAIL(ai_column_names.push_back(ObString::make_string(exist->get_column_name())))) {
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      ret = ObAiColumnResolver::check_no_ai_dependency(*allocator_, ai_expr, ai_column_names);
+    }
+  }
+
+  // The dimension of an AI_EMBED column has to match the declared vector type.
+  if (OB_SUCC(ret) && OB_INVALID_ID != dim) {
+    int64_t declared_dim = 0;
+    if (OB_FAIL(ObVectorIndexUtil::get_vector_dim_from_extend_type_info(
+                    column.get_extended_type_info(), declared_dim))) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN dimension is only supported for vector columns");
+    } else if (declared_dim != dim) {
+      ret = OB_ERR_INVALID_VECTOR_DIM;
+      LOG_USER_ERROR(OB_ERR_INVALID_VECTOR_DIM, declared_dim, dim);
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    ObDataType column_type;
+    column_type.set_obj_type(column.get_data_type());
+    if (OB_FAIL(ObAiColumnResolver::build_normalized_expr(*allocator_, expr_text,
+                                                          column_type, normalized_expr))) {
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    ai_column.column_id_ = column.get_column_id();
+    ai_column.max_retries_ = max_retries;
+    ai_column.result_type_ = static_cast<int64_t>(column.get_data_type());
+    ai_column.vector_dim_ = dim;
+    if (OB_FAIL(ai_column.set_column_name(column.get_column_name_str()))) {
+    } else if (OB_FAIL(ai_column.set_ai_func_name(func_name))) {
+    } else if (OB_FAIL(ai_column.set_ai_model_name(model_name))) {
+    } else if (OB_FAIL(ai_column.set_sync_mode(sync_mode))) {
+    } else if (OB_FAIL(ai_column.set_expr_text(expr_text))) {
+    } else if (OB_FAIL(ai_column.set_normalized_expr(normalized_expr))) {
+    } else if (OB_FAIL(table_schema->add_ai_column(ai_column))) {
+    }
+  }
+
   return ret;
 }
 

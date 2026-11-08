@@ -2484,7 +2484,7 @@ all_ai_column_def = dict(
     meta_record_in_sys = False,
     normal_columns = [
         ('column_name', 'varchar:128', 'false'),
-        ('ai_column_type', 'int', 'false'),
+        ('ai_func_name', 'varchar:128', 'false'),
         ('model_name', 'varchar:128', 'false'),
         ('expr_text', 'varchar:4096', 'true'),
         ('normalized_expr', 'varchar:8192', 'true'),

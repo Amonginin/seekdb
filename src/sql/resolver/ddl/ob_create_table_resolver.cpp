@@ -137,6 +137,94 @@ int ObCreateTableResolver::add_hidden_tablet_seq_col()
   return ret;
 }
 
+// Builds the hidden name of one of the three columns that back an AI column.
+// The prefix is kept short so the result stays within the column name limit.
+static int build_ai_hidden_column_name(common::ObIAllocator &allocator,
+                                        const common::ObString &prefix,
+                                        const common::ObString &column_name,
+                                        common::ObString &hidden_name)
+{
+  int ret = OB_SUCCESS;
+  const int64_t max_len = OB_MAX_COLUMN_NAME_LENGTH - 1;
+  common::ObString raw;
+  char *buf = static_cast<char *>(allocator.alloc(max_len + 1));
+  if (OB_ISNULL(buf)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else {
+    int64_t len = 0;
+    for (int64_t i = 0; i < prefix.length() && len < max_len; ++i, ++len) {
+      buf[len] = prefix.ptr()[i];
+    }
+    for (int64_t i = 0; i < column_name.length() && len < max_len; ++i, ++len) {
+      buf[len] = column_name.ptr()[i];
+    }
+    buf[len] = '\0';
+    raw.assign_ptr(buf, len);
+    if (OB_FAIL(ob_write_string(allocator, raw, hidden_name))) {
+    }
+  }
+  return ret;
+}
+
+// Every AI column is backed by three hidden columns that hold the execution
+// state, the current request id and the result specification of the column.
+int ObCreateTableResolver::add_ai_column_hidden_cols(
+    share::schema::ObTableSchema &table_schema,
+    common::ObSEArray<share::schema::ObColumnSchemaV2, 16> &resolved_cols)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < table_schema.get_ai_column_count(); ++i) {
+    const ObAiColumnSchema *ai_column = table_schema.get_ai_column(i);
+    if (OB_ISNULL(ai_column)) {
+      continue;
+    }
+    struct HiddenColDef
+    {
+      const char *prefix_;
+      common::ColumnType type_;
+      int64_t length_;
+      uint64_t *column_id_;
+    };
+    common::ObString state_name;
+    common::ObString request_name;
+    common::ObString spec_name;
+    ObAiColumnSchema *mutable_ai_column = NULL;
+    // The metadata row is updated in place, so the ids of the three hidden
+    // columns can be written back to it.
+    if (OB_FAIL(table_schema.get_ai_column_mut(i, mutable_ai_column))) {
+      break;
+    }
+    HiddenColDef defs[3] = {
+      {"__ai_state_", ObVarcharType, 16, &mutable_ai_column->state_column_id_},
+      {"__ai_req_", ObVarcharType, 64, &mutable_ai_column->request_column_id_},
+      {"__ai_spec_", ObVarcharType, 1024, &mutable_ai_column->result_spec_column_id_}
+    };
+    for (int64_t j = 0; OB_SUCC(ret) && j < 3; ++j) {
+      common::ObString hidden_name;
+      ObColumnSchemaV2 hidden_col;
+      hidden_col.reset();
+      if (OB_FAIL(build_ai_hidden_column_name(*allocator_, common::ObString::make_string(defs[j].prefix_),
+                                               ai_column->get_column_name() ? ObString::make_string(ai_column->get_column_name()) : ObString(),
+                                               hidden_name))) {
+      } else if (OB_FAIL(hidden_col.set_column_name(hidden_name))) {
+      } else {
+        hidden_col.set_column_id(gen_column_id());
+        hidden_col.set_data_type(defs[j].type_);
+        hidden_col.set_nullable(true);
+        hidden_col.set_is_hidden(true);
+        hidden_col.set_charset_type(CHARSET_UTF8MB4);
+        hidden_col.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+        hidden_col.set_accuracy(ObAccuracy(defs[j].length_));
+        if (OB_FAIL(resolved_cols.push_back(hidden_col))) {
+        } else {
+          *(defs[j].column_id_) = hidden_col.get_column_id();
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 // Set additional information for the temporary table
 int ObCreateTableResolver::set_temp_table_info(ObTableSchema &table_schema, ParseNode *commit_option_node)
 {
@@ -891,6 +979,23 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
         } else {
           ObColumnNameHashWrapper name_key(hidden_col.get_column_name_str());
           if (OB_FAIL(column_name_set_.set_refactored(name_key))) {
+          }
+        }
+      }
+    }
+
+    // Every AI column is backed by three hidden columns; they are appended to
+    // the column list so that they are created together with the table.
+    if (OB_SUCC(ret) && table_schema.get_ai_column_count() > 0) {
+      if (OB_FAIL(add_ai_column_hidden_cols(table_schema, resolved_cols))) {
+      } else {
+        for (int32_t i = resolved_cols_count; i < resolved_cols.count() && OB_SUCC(ret); i++) {
+          ObColumnSchemaV2 &hidden_col = resolved_cols.at(i);
+          if (OB_FAIL(table_schema.add_column(hidden_col))) {
+          } else {
+            ObColumnNameHashWrapper name_key(hidden_col.get_column_name_str());
+            if (OB_FAIL(column_name_set_.set_refactored(name_key))) {
+            }
           }
         }
       }

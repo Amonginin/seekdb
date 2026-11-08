@@ -1131,6 +1131,7 @@ ObTableSchema::ObTableSchema(ObIAllocator *allocator)
     view_schema_(allocator),
     depend_table_ids_(SCHEMA_SMALL_MALLOC_BLOCK_SIZE, ModulePageAllocator(*allocator)),
     simple_index_infos_(SCHEMA_MID_MALLOC_BLOCK_SIZE, ModulePageAllocator(*allocator)),
+    ai_column_array_(SCHEMA_SMALL_MALLOC_BLOCK_SIZE, ModulePageAllocator(*allocator)),
     reserved_table_ids_(SCHEMA_SMALL_MALLOC_BLOCK_SIZE, ModulePageAllocator(*allocator)),
     rowkey_info_(allocator),
     shadow_rowkey_info_(allocator),
@@ -1327,6 +1328,15 @@ int ObTableSchema::assign(const ObTableSchema &src_schema)
 
   if (OB_SUCC(ret)) {
     semistruct_encoding_type_ = src_schema.semistruct_encoding_type_;
+  }
+
+  if (OB_SUCC(ret)) {
+    ai_column_array_.reset();
+    for (int64_t i = 0; OB_SUCC(ret) && i < src_schema.ai_column_array_.count(); ++i) {
+      if (OB_FAIL(ai_column_array_.push_back(src_schema.ai_column_array_.at(i)))) {
+        LOG_WARN("failed to copy ai column metadata", K(ret), K(i));
+      }
+    }
   }
 
   if (OB_FAIL(ret)) {
@@ -2564,6 +2574,7 @@ void ObTableSchema::reset()
   view_schema_.reset();
 
   reserved_table_ids_.reset();
+  ai_column_array_.reset();
 
   depend_table_ids_.reset();
   depend_mock_fk_parent_table_ids_.reset();
@@ -5317,6 +5328,241 @@ bool ObTableSchema::same_subpartitions(const ObTableSchema &other) const
   return bret;
 }*/
 
+//////////////////////////////////////////////////////////////////////////////
+// ObAiColumnSchema
+//////////////////////////////////////////////////////////////////////////////
+ObAiColumnSchema::ObAiColumnSchema()
+{
+  reset();
+}
+
+void ObAiColumnSchema::reset()
+{
+  column_id_ = OB_INVALID_ID;
+  state_column_id_ = OB_INVALID_ID;
+  request_column_id_ = OB_INVALID_ID;
+  result_spec_column_id_ = OB_INVALID_ID;
+  max_retries_ = 0;
+  result_type_ = 0;
+  vector_dim_ = OB_INVALID_ID;
+  MEMSET(column_name_, 0, sizeof(column_name_));
+  MEMSET(ai_func_name_, 0, sizeof(ai_func_name_));
+  MEMSET(ai_model_name_, 0, sizeof(ai_model_name_));
+  MEMSET(sync_mode_, 0, sizeof(sync_mode_));
+  MEMSET(expr_text_, 0, sizeof(expr_text_));
+  MEMSET(normalized_expr_, 0, sizeof(normalized_expr_));
+}
+
+bool ObAiColumnSchema::is_valid() const
+{
+  return OB_INVALID_ID != column_id_
+      && '\0' != column_name_[0]
+      && '\0' != ai_func_name_[0];
+}
+
+int ObAiColumnSchema::assign(const ObAiColumnSchema &other)
+{
+  int ret = OB_SUCCESS;
+  if (this != &other && OB_FAIL(set_buffer(column_name_, MAX_NAME_LEN,
+                                           ObString::make_string(other.column_name_)))) {
+  } else if (this == &other) {
+  } else if (OB_FAIL(set_buffer(ai_func_name_, MAX_NAME_LEN,
+                                ObString::make_string(other.ai_func_name_)))) {
+  } else if (OB_FAIL(set_buffer(ai_model_name_, MAX_MODEL_LEN,
+                                ObString::make_string(other.ai_model_name_)))) {
+  } else if (OB_FAIL(set_buffer(sync_mode_, MAX_MODE_LEN,
+                                ObString::make_string(other.sync_mode_)))) {
+  } else if (OB_FAIL(set_buffer(expr_text_, MAX_EXPR_LEN,
+                                ObString::make_string(other.expr_text_)))) {
+  } else if (OB_FAIL(set_buffer(normalized_expr_, MAX_EXPR_LEN,
+                                ObString::make_string(other.normalized_expr_)))) {
+  } else {
+    column_id_ = other.column_id_;
+    state_column_id_ = other.state_column_id_;
+    request_column_id_ = other.request_column_id_;
+    result_spec_column_id_ = other.result_spec_column_id_;
+    max_retries_ = other.max_retries_;
+    result_type_ = other.result_type_;
+    vector_dim_ = other.vector_dim_;
+  }
+  return ret;
+}
+
+int ObAiColumnSchema::set_buffer(char *buffer,
+                                 const int64_t capacity,
+                                 const common::ObString &value)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(buffer) || OB_UNLIKELY(capacity <= 0)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_UNLIKELY(value.length() < 0 || value.length() >= capacity)) {
+    ret = OB_SIZE_OVERFLOW;
+    LOG_WARN("ai column metadata field exceeds its buffer", K(ret), K(value), K(capacity));
+  } else {
+    buffer[0] = '\0';
+    if (value.length() > 0) {
+      if (OB_ISNULL(value.ptr())) {
+        ret = OB_INVALID_ARGUMENT;
+      } else {
+        MEMCPY(buffer, value.ptr(), value.length());
+        buffer[value.length()] = '\0';
+      }
+    }
+  }
+  return ret;
+}
+
+int ObAiColumnSchema::set_column_name(const common::ObString &name)
+{
+  return set_buffer(column_name_, MAX_NAME_LEN, name);
+}
+
+int ObAiColumnSchema::set_ai_func_name(const common::ObString &name)
+{
+  return set_buffer(ai_func_name_, MAX_NAME_LEN, name);
+}
+
+int ObAiColumnSchema::set_ai_model_name(const common::ObString &name)
+{
+  return set_buffer(ai_model_name_, MAX_MODEL_LEN, name);
+}
+
+int ObAiColumnSchema::set_sync_mode(const common::ObString &mode)
+{
+  return set_buffer(sync_mode_, MAX_MODE_LEN, mode);
+}
+
+int ObAiColumnSchema::set_expr_text(const common::ObString &expr)
+{
+  return set_buffer(expr_text_, MAX_EXPR_LEN, expr);
+}
+
+int ObAiColumnSchema::set_normalized_expr(const common::ObString &expr)
+{
+  return set_buffer(normalized_expr_, MAX_EXPR_LEN, expr);
+}
+
+OB_DEF_SERIALIZE(ObAiColumnSchema)
+{
+  int ret = OB_SUCCESS;
+  ObString column_name;
+  ObString ai_func_name;
+  ObString ai_model_name;
+  ObString sync_mode;
+  ObString expr_text;
+  ObString normalized_expr;
+  column_name.assign_ptr(column_name_, static_cast<int32_t>(strlen(column_name_)));
+  ai_func_name.assign_ptr(ai_func_name_, static_cast<int32_t>(strlen(ai_func_name_)));
+  ai_model_name.assign_ptr(ai_model_name_, static_cast<int32_t>(strlen(ai_model_name_)));
+  sync_mode.assign_ptr(sync_mode_, static_cast<int32_t>(strlen(sync_mode_)));
+  expr_text.assign_ptr(expr_text_, static_cast<int32_t>(strlen(expr_text_)));
+  normalized_expr.assign_ptr(normalized_expr_, static_cast<int32_t>(strlen(normalized_expr_)));
+  LST_DO_CODE(OB_UNIS_ENCODE,
+              column_id_,
+              state_column_id_,
+              request_column_id_,
+              result_spec_column_id_,
+              max_retries_,
+              result_type_,
+              vector_dim_,
+              column_name,
+              ai_func_name,
+              ai_model_name,
+              sync_mode,
+              expr_text,
+              normalized_expr);
+  return ret;
+}
+
+OB_DEF_DESERIALIZE(ObAiColumnSchema)
+{
+  int ret = OB_SUCCESS;
+  ObString column_name;
+  ObString ai_func_name;
+  ObString ai_model_name;
+  ObString sync_mode;
+  ObString expr_text;
+  ObString normalized_expr;
+  LST_DO_CODE(OB_UNIS_DECODE,
+              column_id_,
+              state_column_id_,
+              request_column_id_,
+              result_spec_column_id_,
+              max_retries_,
+              result_type_,
+              vector_dim_,
+              column_name,
+              ai_func_name,
+              ai_model_name,
+              sync_mode,
+              expr_text,
+              normalized_expr);
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(set_buffer(column_name_, MAX_NAME_LEN, column_name))) {
+  } else if (OB_FAIL(set_buffer(ai_func_name_, MAX_NAME_LEN, ai_func_name))) {
+  } else if (OB_FAIL(set_buffer(ai_model_name_, MAX_MODEL_LEN, ai_model_name))) {
+  } else if (OB_FAIL(set_buffer(sync_mode_, MAX_MODE_LEN, sync_mode))) {
+  } else if (OB_FAIL(set_buffer(expr_text_, MAX_EXPR_LEN, expr_text))) {
+  } else if (OB_FAIL(set_buffer(normalized_expr_, MAX_EXPR_LEN, normalized_expr))) {
+  }
+  return ret;
+}
+
+OB_DEF_SERIALIZE_SIZE(ObAiColumnSchema)
+{
+  int64_t len = 0;
+  ObString column_name;
+  ObString ai_func_name;
+  ObString ai_model_name;
+  ObString sync_mode;
+  ObString expr_text;
+  ObString normalized_expr;
+  column_name.assign_ptr(column_name_, static_cast<int32_t>(strlen(column_name_)));
+  ai_func_name.assign_ptr(ai_func_name_, static_cast<int32_t>(strlen(ai_func_name_)));
+  ai_model_name.assign_ptr(ai_model_name_, static_cast<int32_t>(strlen(ai_model_name_)));
+  sync_mode.assign_ptr(sync_mode_, static_cast<int32_t>(strlen(sync_mode_)));
+  expr_text.assign_ptr(expr_text_, static_cast<int32_t>(strlen(expr_text_)));
+  normalized_expr.assign_ptr(normalized_expr_, static_cast<int32_t>(strlen(normalized_expr_)));
+  LST_DO_CODE(OB_UNIS_ADD_LEN,
+              column_id_,
+              state_column_id_,
+              request_column_id_,
+              result_spec_column_id_,
+              max_retries_,
+              result_type_,
+              vector_dim_,
+              column_name,
+              ai_func_name,
+              ai_model_name,
+              sync_mode,
+              expr_text,
+              normalized_expr);
+  return len;
+}
+
+int ObTableSchema::add_ai_column(const ObAiColumnSchema &ai_column)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!ai_column.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid ai column metadata", K(ret), K(ai_column));
+  } else if (OB_FAIL(ai_column_array_.push_back(ai_column))) {
+    LOG_WARN("failed to push back ai column metadata", K(ret), K(ai_column));
+  }
+  return ret;
+}
+
+const ObAiColumnSchema *ObTableSchema::get_ai_column_by_column_id(const uint64_t column_id) const
+{
+  const ObAiColumnSchema *result = NULL;
+  for (int64_t i = 0; NULL == result && i < ai_column_array_.count(); ++i) {
+    if (ai_column_array_.at(i).column_id_ == column_id) {
+      result = &ai_column_array_.at(i);
+    }
+  }
+  return result;
+}
+
 OB_DEF_SERIALIZE(ObTableSchema)
 {
   int ret = OB_SUCCESS;
@@ -5406,6 +5652,7 @@ OB_DEF_SERIALIZE(ObTableSchema)
   OB_UNIS_ENCODE(parser_properties_);
   OB_UNIS_ENCODE(semistruct_encoding_type_);
   OB_UNIS_ENCODE(micro_block_format_version_);
+  OB_UNIS_ENCODE(ai_column_array_);
   // !!! end static check
   /*
    * Add deserialized members before this end static check comment
@@ -5609,6 +5856,7 @@ OB_DEF_DESERIALIZE(ObTableSchema)
   OB_UNIS_DECODE_AND_FUNC(parser_properties_, deep_copy_str);
   OB_UNIS_DECODE(semistruct_encoding_type_);
   OB_UNIS_DECODE(micro_block_format_version_);
+  OB_UNIS_DECODE(ai_column_array_);
   // !!! end static check
   /*
    * Add deserialized members before this end static check comment
@@ -5719,6 +5967,7 @@ OB_DEF_SERIALIZE_SIZE(ObTableSchema)
   OB_UNIS_ADD_LEN(parser_properties_);
   OB_UNIS_ADD_LEN(semistruct_encoding_type_);
   OB_UNIS_ADD_LEN(micro_block_format_version_);
+  OB_UNIS_ADD_LEN(ai_column_array_);
   // !!! end static check
   /*
    * Add deserialized members before this end static check comment

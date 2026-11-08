@@ -934,6 +934,73 @@ protected:
   
 };
 
+// Metadata of one AI column. The visible result column is described by
+// column_id_ / column_name_; the three hidden columns that back it are
+// referenced by their column ids. The record is persisted to
+// __all_ai_column and travels inside ObTableSchema so the DDL executor can
+// write it in the same transaction that creates the table.
+//
+// Strings use fixed buffers on purpose: the struct stays trivially
+// serializable and needs no allocator, which keeps the wire format of
+// ObTableSchema self contained.
+struct ObAiColumnSchema
+{
+  OB_UNIS_VERSION(1);
+
+public:
+  static const int64_t MAX_NAME_LEN = 128;
+  static const int64_t MAX_MODEL_LEN = 128;
+  static const int64_t MAX_MODE_LEN = 16;
+  static const int64_t MAX_EXPR_LEN = 2048;
+
+  // The status of an AI column: 0 means the definition is valid.
+  static const int64_t AI_COLUMN_STATUS_VALID = 0;
+
+  ObAiColumnSchema();
+  ~ObAiColumnSchema() {}
+  void reset();
+  bool is_valid() const;
+  int assign(const ObAiColumnSchema &other);
+
+  int set_column_name(const common::ObString &name);
+  int set_ai_func_name(const common::ObString &name);
+  int set_ai_model_name(const common::ObString &name);
+  int set_sync_mode(const common::ObString &mode);
+  int set_expr_text(const common::ObString &expr);
+  int set_normalized_expr(const common::ObString &expr);
+
+  const char *get_column_name() const { return column_name_; }
+  const char *get_ai_func_name() const { return ai_func_name_; }
+  const char *get_ai_model_name() const { return ai_model_name_; }
+  const char *get_sync_mode() const { return sync_mode_; }
+  const char *get_expr_text() const { return expr_text_; }
+  const char *get_normalized_expr() const { return normalized_expr_; }
+  int64_t get_result_type() const { return result_type_; }
+  int64_t get_vector_dim() const { return vector_dim_; }
+
+  TO_STRING_KV(K_(column_id), K_(max_retries), K_(result_type), K_(vector_dim),
+               K_(state_column_id), K_(request_column_id), K_(result_spec_column_id),
+               KCSTRING_(column_name), KCSTRING_(ai_func_name), KCSTRING_(ai_model_name),
+               KCSTRING_(sync_mode), KCSTRING_(expr_text), KCSTRING_(normalized_expr));
+
+  uint64_t column_id_;
+  uint64_t state_column_id_;
+  uint64_t request_column_id_;
+  uint64_t result_spec_column_id_;
+  int64_t max_retries_;
+  int64_t result_type_;
+  int64_t vector_dim_;
+  char column_name_[MAX_NAME_LEN];
+  char ai_func_name_[MAX_NAME_LEN];
+  char ai_model_name_[MAX_MODEL_LEN];
+  char sync_mode_[MAX_MODE_LEN];
+  char expr_text_[MAX_EXPR_LEN];
+  char normalized_expr_[MAX_EXPR_LEN];
+
+private:
+  int set_buffer(char *buffer, const int64_t capacity, const common::ObString &value);
+};
+
 class ObTableSchema : public ObSimpleTableSchemaV2
 {
   OB_UNIS_VERSION(1);
@@ -1289,6 +1356,24 @@ public:
   //other methods
   int64_t get_convert_size() const;
   void reset();
+
+  // AI column metadata (DDL path only, see ai_column_array_)
+  inline int64_t get_ai_column_count() const { return ai_column_array_.count(); }
+  inline const common::ObIArray<ObAiColumnSchema> &get_ai_column_array() const
+  {
+    return ai_column_array_;
+  }
+  inline const ObAiColumnSchema *get_ai_column(const int64_t idx) const
+  {
+    return (idx >= 0 && idx < ai_column_array_.count()) ? &ai_column_array_.at(idx) : NULL;
+  }
+  inline ObAiColumnSchema *get_ai_column_mut(const int64_t idx)
+  {
+    return (idx >= 0 && idx < ai_column_array_.count()) ? &ai_column_array_.at(idx) : NULL;
+  }
+  int add_ai_column(const ObAiColumnSchema &ai_column);
+  const ObAiColumnSchema *get_ai_column_by_column_id(const uint64_t column_id) const;
+  void reset_ai_columns() { ai_column_array_.reset(); }
   //int64_t to_string(char *buf, const int64_t buf_len) const;
   //whether the primary key or index is ordered
   inline bool is_ordered() const { return USING_BTREE == index_using_type_; }
@@ -1604,6 +1689,10 @@ protected:
   common::ObSArray<uint64_t> depend_table_ids_;
 
   common::ObSArray<ObAuxTableMetaInfo> simple_index_infos_;
+
+  // AI columns declared on this table, in declaration order. Only populated in
+  // the DDL path (create / alter add column); empty for every other table.
+  common::ObSArray<ObAiColumnSchema> ai_column_array_;
 
   // Serialized compatibility slot for the removed table-type 11 metadata.
   common::ObSArray<uint64_t> reserved_table_ids_;
