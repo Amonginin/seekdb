@@ -25,8 +25,6 @@
 
 namespace oceanbase
 {
-namespace sql
-{
 
 // Temporary tracing helper for the AI column DDL path. The OceanBase log
 // module swallows warnings in this build and stderr is redirected, so the trace
@@ -56,7 +54,6 @@ public:
   }
 };
 
-} // namespace sql
 } // namespace oceanbase
 
 #endif // _OB_AI_DIAG_H

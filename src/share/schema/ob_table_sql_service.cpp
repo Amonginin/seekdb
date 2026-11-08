@@ -1154,6 +1154,7 @@ int ObTableSqlService::batch_add_ai_columns_for_create_table(common::ObISQLClien
       } else if (OB_FAIL(dml.add_column("result_spec_column_id", ai_column->result_spec_column_id_))) {
       } else if (OB_FAIL(dml.add_column("status",
                                         static_cast<int64_t>(ObAiColumnSchema::AI_COLUMN_STATUS_VALID)))) {
+      } else if (OB_FAIL(dml.finish_row())) {
       } else {
         row_count++;
       }
