@@ -149,15 +149,20 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
 
     if (OB_FAIL(ret)){
     } else if (OB_FAIL(ObAIFuncUtils::get_ai_func_info(temp_allocator, model_id, info))) {
+      LOG_WARN("ai complete, failed to get the model info", K(ret), K(model_id));
     } else if (OB_ISNULL(endpoint_resolver)) {
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_FAIL(endpoint_resolver->resolve_by_model_name(
                    model_id, temp_allocator, resolved_endpoint))) {
+      LOG_WARN("ai complete, failed to resolve the endpoint", K(ret), K(model_id));
     } else {
       ObAIFuncModel model(temp_allocator, *info, *endpoint_info);
       ObString result;
       if (OB_FAIL(model.call_completion(prompt, config, result))) {
+        LOG_WARN("ai complete, failed to call the model", K(ret));
       } else if (OB_FAIL(ObAIFuncUtils::set_string_result(expr, ctx, res, result))) {
+        LOG_WARN("ai complete, failed to write the result back", K(ret),
+                 K(result.length()), KP(result.ptr()));
       }
     }
   }

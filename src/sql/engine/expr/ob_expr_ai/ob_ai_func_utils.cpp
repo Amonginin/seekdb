@@ -1333,6 +1333,11 @@ int ObAIFuncModel::call_completion(ObString &prompt, ObJsonObject *config, ObStr
   } else {
     result = result_str;
   }
+  if (OB_FAIL(ret)) {
+    LOG_WARN("ai complete call failed", K(ret), K(endpoint_info_.get_provider()),
+             K(endpoint_info_.get_url()), K(endpoint_info_.get_request_model_name()),
+             K(request_model_name), K(prompt.length()), K(config != nullptr));
+  }
   if (ret == OB_INVALID_DATA) {
     ObString response_str;
     if (OB_SUCCESS == ObAIFuncJsonUtils::print_json_to_str(*allocator_, response, response_str)) {
