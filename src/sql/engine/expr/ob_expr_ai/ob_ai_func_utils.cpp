@@ -1632,11 +1632,18 @@ int ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(ObIAllocator &al
     char *result_buf = NULL;
     for (uint64_t i = 0; OB_SUCC(ret) && i < args_count; i++) {
       ObJsonNode *arg_node = args_array->get_value(i);
-      if (OB_NOT_NULL(arg_node) && arg_node->json_type() == ObJsonNodeType::J_STRING) {
+      if (OB_ISNULL(arg_node)) {
+        ret = OB_INVALID_ARGUMENT;
+      } else if (arg_node->json_type() == ObJsonNodeType::J_STRING) {
         ObJsonString *arg_str = static_cast<ObJsonString *>(arg_node);
         max_result_len += arg_str->get_str().length();
       } else {
-        ret = OB_INVALID_ARGUMENT;
+        // Structured args (J_OBJECT/J_ARRAY/number/boolean) are rendered as JSON text.
+        ObString printed_arg;
+        if (OB_FAIL(ObAIFuncJsonUtils::print_json_to_str(allocator, arg_node, printed_arg))) {
+        } else {
+          max_result_len += printed_arg.length();
+        }
       }
     }
     if (OB_FAIL(ret)) {
@@ -1678,20 +1685,21 @@ int ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(ObIAllocator &al
             
             if (valid_index && index >= 0 && static_cast<uint64_t>(index) < args_count) {
               ObJsonNode *arg_node = args_array->get_value(static_cast<uint64_t>(index));
-              if (OB_NOT_NULL(arg_node) && arg_node->json_type() == ObJsonNodeType::J_STRING) {
-                ObJsonString *arg_str = static_cast<ObJsonString *>(arg_node);
-                ObString arg_value = arg_str->get_str();
-                
+              ObString arg_value;
+              if (OB_ISNULL(arg_node)) {
+                ret = OB_INVALID_ARGUMENT;
+              } else if (arg_node->json_type() == ObJsonNodeType::J_STRING) {
+                arg_value = static_cast<ObJsonString *>(arg_node)->get_str();
+              } else if (OB_FAIL(ObAIFuncJsonUtils::print_json_to_str(allocator, arg_node, arg_value))) {
+              }
+              if (OB_SUCC(ret)) {
                 if (result_pos + arg_value.length() <= max_result_len) {
                   MEMCPY(result_buf + result_pos, arg_value.ptr(), arg_value.length());
                   result_pos += arg_value.length();
                 } else {
                   ret = OB_BUF_NOT_ENOUGH;
                 }
-              } else {
-                //do nothing
               }
-              
               i = end_pos;
             } else {
               ret = OB_INVALID_ARGUMENT;
