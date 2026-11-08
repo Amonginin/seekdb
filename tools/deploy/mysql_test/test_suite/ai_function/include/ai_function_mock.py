@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 DEFAULT_PORT = 8000
-EMBED_DIMENSION = 8
+EMBED_DIMENSION = 768
 
 
 def state_dir(port):

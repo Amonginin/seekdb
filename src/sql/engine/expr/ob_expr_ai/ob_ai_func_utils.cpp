@@ -393,7 +393,18 @@ int ObOllamaUtils::ObOllamaEmbed::parse_output(common::ObIAllocator &allocator,
     if (OB_FAIL(j_path.parse_path())) {
     } else if (OB_FAIL(j_tree->seek(j_path, j_path.path_node_cnt(), false, false, hit))) {
     } else if (hit.size() == 0) {
-      ret = OB_ERR_UNEXPECTED;
+      // Some Ollama-compatible services return a singular "embedding" field.
+      // Accept both spellings so the caller works with either mock.
+      common::ObString alt_path_text("$.embedding");
+      ObJsonPath alt_j_path(alt_path_text, &allocator);
+      ObJsonSeekResult alt_hit;
+      if (OB_FAIL(alt_j_path.parse_path())) {
+      } else if (OB_FAIL(j_tree->seek(alt_j_path, alt_j_path.path_node_cnt(), false, false, alt_hit))) {
+      } else if (alt_hit.size() == 0) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        result = alt_hit[0];
+      }
     } else {
       result = hit[0];
     }
