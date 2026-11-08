@@ -15,31 +15,12 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
-#include <cstdio>
-#include <fcntl.h>
-#include <unistd.h>
 #include "ob_expr_ai_complete.h"
 #include "query/ai/ob_ai_endpoint_resolver.h"
 #include "share/rc/ob_server_runtime.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
-
-// Temporary trace: seekdb redirects stderr and the SQL_ENG log module swallows
-// its own records, so the only reliable channel is a plain file write.
-static void aidbg_trace(const char *stage, long v1, long v2)
-{
-  int fd = ::open("/tmp/aidbg.log", O_CREAT | O_WRONLY | O_APPEND, 0644);
-  if (fd >= 0) {
-    char buf[256];
-    int n = snprintf(buf, sizeof(buf), "%s v1=%ld v2=%ld\n", stage, v1, v2);
-    if (n > 0) {
-      ssize_t ignored = ::write(fd, buf, n);
-      (void)ignored;
-    }
-    ::close(fd);
-  }
-}
 
 namespace oceanbase 
 {
@@ -67,7 +48,6 @@ int ObExprAIComplete::calc_result_typeN(ObExprResType &type,
 
   UNUSED(type_ctx);
   int ret = OB_SUCCESS;
-  aidbg_trace("calc_result_typeN", static_cast<long>(param_num), 0);
   if (OB_UNLIKELY(param_num < 2 || param_num > 3)) {
     ObString func_name_(get_name());
     ret = OB_ERR_PARAM_SIZE;
@@ -107,17 +87,10 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
                                        ObDatum &res) 
 {
   INIT_SUCC(ret);
-  aidbg_trace("eval_ai_complete enter", static_cast<long>(expr.arg_cnt_), 0);
-  fprintf(stderr, "[AIDBG] eval_ai_complete enter arg_cnt=%ld\n", static_cast<long>(expr.arg_cnt_));
-  fflush(stderr);
-  LOG_ERROR("ai complete entered", K(ret), K(expr.arg_cnt_));
   ObDatum *arg_model_id = nullptr;
   ObDatum *arg_prompt = nullptr;
   ObDatum *arg_config = nullptr;
   if (OB_FAIL(expr.eval_param_value(ctx, arg_model_id, arg_prompt, arg_config))) {
-    fprintf(stderr, "[AIDBG] eval_param_value failed ret=%d\n", ret);
-    fflush(stderr);
-    LOG_ERROR("ai complete, failed to evaluate the parameters", K(ret), K(expr.arg_cnt_));
   } else if (arg_model_id->is_null() || arg_prompt->is_null()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete, parameters is null");
@@ -176,36 +149,17 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
 
     if (OB_FAIL(ret)){
     } else if (OB_FAIL(ObAIFuncUtils::get_ai_func_info(temp_allocator, model_id, info))) {
-      aidbg_trace("get_ai_func_info failed", static_cast<long>(ret), 0);
-      LOG_ERROR("ai complete, failed to get the model info", K(ret), K(model_id));
     } else if (OB_ISNULL(endpoint_resolver)) {
       ret = OB_ERR_UNEXPECTED;
-      aidbg_trace("endpoint_resolver is null", static_cast<long>(ret), 0);
-      LOG_ERROR("ai complete, the endpoint resolver is null", K(ret));
     } else if (OB_FAIL(endpoint_resolver->resolve_by_model_name(
                    model_id, temp_allocator, resolved_endpoint))) {
-      aidbg_trace("resolve_by_model_name failed", static_cast<long>(ret), 0);
-      LOG_ERROR("ai complete, failed to resolve the endpoint", K(ret), K(model_id));
     } else {
-      aidbg_trace("resolved endpoint", static_cast<long>(resolved_endpoint.get_url().length()),
-                  static_cast<long>(resolved_endpoint.get_provider().length()));
       ObAIFuncModel model(temp_allocator, *info, *endpoint_info);
       ObString result;
       if (OB_FAIL(model.call_completion(prompt, config, result))) {
-        aidbg_trace("call_completion failed", static_cast<long>(ret), 0);
-        LOG_ERROR("ai complete, failed to call the model", K(ret));
       } else if (OB_FAIL(ObAIFuncUtils::set_string_result(expr, ctx, res, result))) {
-        aidbg_trace("set_string_result failed", static_cast<long>(ret),
-                    static_cast<long>(result.length()));
-        LOG_ERROR("ai complete, failed to write the result back", K(ret),
-                  K(result.length()), KP(result.ptr()));
       }
     }
-  }
-  if (OB_FAIL(ret)) {
-    aidbg_trace("eval_ai_complete exit", static_cast<long>(ret), 0);
-    fprintf(stderr, "[AIDBG] eval_ai_complete exit ret=%d\n", ret);
-    fflush(stderr);
   }
   return ret;
 }
@@ -215,7 +169,6 @@ int ObExprAIComplete::cg_expr(ObExprCGCtx &expr_cg_ctx,
                               ObExpr &rt_expr) const 
 {
   INIT_SUCC(ret);
-  aidbg_trace("cg_expr enter", static_cast<long>(rt_expr.arg_cnt_), 0);
   // TODO: support schema version match in plan cache for ai func
   // const ObRawExpr *model_key = raw_expr.get_param_expr(0);
   // if (OB_NOT_NULL(model_key)
@@ -245,9 +198,6 @@ int ObExprAIComplete::cg_expr(ObExprCGCtx &expr_cg_ctx,
   // }
 
   if (OB_SUCC(ret)) {
-    fprintf(stderr, "[AIDBG] cg_expr binds the evaluator\n");
-    fflush(stderr);
-    LOG_ERROR("ai complete, cg_expr binds the evaluator", K(ret));
     rt_expr.eval_func_ = ObExprAIComplete::eval_ai_complete;
   }
   return ret;
