@@ -2358,6 +2358,8 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
   ObString func_name;
   ObString model_name;
   ObString expr_text;
+  ObString arg_expr_text;
+  ObString dep_column_ids;
   ObString sync_mode;
   ObString normalized_expr;
   int64_t dim = OB_INVALID_ID;
@@ -2387,7 +2389,7 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
 
   if (OB_SUCC(ret)) {
     if (OB_FAIL(ObAiColumnResolver::parse_ai_expr(*allocator_, ai_expr, func_name,
-                                                  model_name, expr_text, dim))) {
+                                                  model_name, expr_text, arg_expr_text, dim))) {
     } else if (OB_FAIL(ObAiColumnResolver::parse_ai_options(option_node, sync_mode, max_retries))) {
     }
   }
@@ -2427,6 +2429,13 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     }
   }
 
+  // The dependency list lets the DML path decide whether an update is relevant.
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(ObAiColumnResolver::build_dependency_ids(*allocator_, ai_expr,
+                                                        *table_schema, dep_column_ids))) {
+    }
+  }
+
   if (OB_SUCC(ret)) {
     ObDataType column_type;
     column_type.set_obj_type(column.get_data_type());
@@ -2451,6 +2460,8 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     } else if (OB_FAIL(ai_column.set_ai_model_name(model_name))) {
     } else if (OB_FAIL(ai_column.set_sync_mode(sync_mode))) {
     } else if (OB_FAIL(ai_column.set_expr_text(expr_text))) {
+    } else if (OB_FAIL(ai_column.set_arg_expr_text(arg_expr_text))) {
+    } else if (OB_FAIL(ai_column.set_dep_column_ids(dep_column_ids))) {
     } else if (OB_FAIL(ai_column.set_normalized_expr(normalized_expr))) {
     } else if (OB_FAIL(table_schema->add_ai_column(ai_column))) {
     }

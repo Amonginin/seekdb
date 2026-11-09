@@ -5350,6 +5350,8 @@ void ObAiColumnSchema::reset()
   MEMSET(ai_model_name_, 0, sizeof(ai_model_name_));
   MEMSET(sync_mode_, 0, sizeof(sync_mode_));
   MEMSET(expr_text_, 0, sizeof(expr_text_));
+  MEMSET(arg_expr_text_, 0, sizeof(arg_expr_text_));
+  MEMSET(dep_column_ids_, 0, sizeof(dep_column_ids_));
   MEMSET(normalized_expr_, 0, sizeof(normalized_expr_));
 }
 
@@ -5374,6 +5376,10 @@ int ObAiColumnSchema::assign(const ObAiColumnSchema &other)
                                 ObString::make_string(other.sync_mode_)))) {
   } else if (OB_FAIL(set_buffer(expr_text_, MAX_EXPR_LEN,
                                 ObString::make_string(other.expr_text_)))) {
+  } else if (OB_FAIL(set_buffer(arg_expr_text_, MAX_EXPR_LEN,
+                                ObString::make_string(other.arg_expr_text_)))) {
+  } else if (OB_FAIL(set_buffer(dep_column_ids_, MAX_DEP_LEN,
+                                ObString::make_string(other.dep_column_ids_)))) {
   } else if (OB_FAIL(set_buffer(normalized_expr_, MAX_EXPR_LEN,
                                 ObString::make_string(other.normalized_expr_)))) {
   } else {
@@ -5437,6 +5443,16 @@ int ObAiColumnSchema::set_expr_text(const common::ObString &expr)
   return set_buffer(expr_text_, MAX_EXPR_LEN, expr);
 }
 
+int ObAiColumnSchema::set_arg_expr_text(const common::ObString &expr)
+{
+  return set_buffer(arg_expr_text_, MAX_EXPR_LEN, expr);
+}
+
+int ObAiColumnSchema::set_dep_column_ids(const common::ObString &ids)
+{
+  return set_buffer(dep_column_ids_, MAX_DEP_LEN, ids);
+}
+
 int ObAiColumnSchema::set_normalized_expr(const common::ObString &expr)
 {
   return set_buffer(normalized_expr_, MAX_EXPR_LEN, expr);
@@ -5450,12 +5466,16 @@ OB_DEF_SERIALIZE(ObAiColumnSchema)
   ObString ai_model_name;
   ObString sync_mode;
   ObString expr_text;
+  ObString arg_expr_text;
+  ObString dep_column_ids;
   ObString normalized_expr;
   column_name.assign_ptr(column_name_, static_cast<int32_t>(strlen(column_name_)));
   ai_func_name.assign_ptr(ai_func_name_, static_cast<int32_t>(strlen(ai_func_name_)));
   ai_model_name.assign_ptr(ai_model_name_, static_cast<int32_t>(strlen(ai_model_name_)));
   sync_mode.assign_ptr(sync_mode_, static_cast<int32_t>(strlen(sync_mode_)));
   expr_text.assign_ptr(expr_text_, static_cast<int32_t>(strlen(expr_text_)));
+  arg_expr_text.assign_ptr(arg_expr_text_, static_cast<int32_t>(strlen(arg_expr_text_)));
+  dep_column_ids.assign_ptr(dep_column_ids_, static_cast<int32_t>(strlen(dep_column_ids_)));
   normalized_expr.assign_ptr(normalized_expr_, static_cast<int32_t>(strlen(normalized_expr_)));
   LST_DO_CODE(OB_UNIS_ENCODE,
               column_id_,
@@ -5470,6 +5490,8 @@ OB_DEF_SERIALIZE(ObAiColumnSchema)
               ai_model_name,
               sync_mode,
               expr_text,
+              arg_expr_text,
+              dep_column_ids,
               normalized_expr);
   return ret;
 }
@@ -5482,6 +5504,8 @@ OB_DEF_DESERIALIZE(ObAiColumnSchema)
   ObString ai_model_name;
   ObString sync_mode;
   ObString expr_text;
+  ObString arg_expr_text;
+  ObString dep_column_ids;
   ObString normalized_expr;
   LST_DO_CODE(OB_UNIS_DECODE,
               column_id_,
@@ -5496,6 +5520,8 @@ OB_DEF_DESERIALIZE(ObAiColumnSchema)
               ai_model_name,
               sync_mode,
               expr_text,
+              arg_expr_text,
+              dep_column_ids,
               normalized_expr);
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(set_buffer(column_name_, MAX_NAME_LEN, column_name))) {
@@ -5503,6 +5529,8 @@ OB_DEF_DESERIALIZE(ObAiColumnSchema)
   } else if (OB_FAIL(set_buffer(ai_model_name_, MAX_MODEL_LEN, ai_model_name))) {
   } else if (OB_FAIL(set_buffer(sync_mode_, MAX_MODE_LEN, sync_mode))) {
   } else if (OB_FAIL(set_buffer(expr_text_, MAX_EXPR_LEN, expr_text))) {
+  } else if (OB_FAIL(set_buffer(arg_expr_text_, MAX_EXPR_LEN, arg_expr_text))) {
+  } else if (OB_FAIL(set_buffer(dep_column_ids_, MAX_DEP_LEN, dep_column_ids))) {
   } else if (OB_FAIL(set_buffer(normalized_expr_, MAX_EXPR_LEN, normalized_expr))) {
   }
   return ret;
@@ -5516,12 +5544,16 @@ OB_DEF_SERIALIZE_SIZE(ObAiColumnSchema)
   ObString ai_model_name;
   ObString sync_mode;
   ObString expr_text;
+  ObString arg_expr_text;
+  ObString dep_column_ids;
   ObString normalized_expr;
   column_name.assign_ptr(column_name_, static_cast<int32_t>(strlen(column_name_)));
   ai_func_name.assign_ptr(ai_func_name_, static_cast<int32_t>(strlen(ai_func_name_)));
   ai_model_name.assign_ptr(ai_model_name_, static_cast<int32_t>(strlen(ai_model_name_)));
   sync_mode.assign_ptr(sync_mode_, static_cast<int32_t>(strlen(sync_mode_)));
   expr_text.assign_ptr(expr_text_, static_cast<int32_t>(strlen(expr_text_)));
+  arg_expr_text.assign_ptr(arg_expr_text_, static_cast<int32_t>(strlen(arg_expr_text_)));
+  dep_column_ids.assign_ptr(dep_column_ids_, static_cast<int32_t>(strlen(dep_column_ids_)));
   normalized_expr.assign_ptr(normalized_expr_, static_cast<int32_t>(strlen(normalized_expr_)));
   LST_DO_CODE(OB_UNIS_ADD_LEN,
               column_id_,
@@ -5536,6 +5568,8 @@ OB_DEF_SERIALIZE_SIZE(ObAiColumnSchema)
               ai_model_name,
               sync_mode,
               expr_text,
+              arg_expr_text,
+              dep_column_ids,
               normalized_expr);
   return len;
 }

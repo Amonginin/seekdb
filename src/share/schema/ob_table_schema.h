@@ -952,6 +952,7 @@ public:
   static const int64_t MAX_MODEL_LEN = 128;
   static const int64_t MAX_MODE_LEN = 16;
   static const int64_t MAX_EXPR_LEN = 2048;
+  static const int64_t MAX_DEP_LEN = 512;
 
   // The status of an AI column: 0 means the definition is valid.
   static const int64_t AI_COLUMN_STATUS_VALID = 0;
@@ -967,6 +968,8 @@ public:
   int set_ai_model_name(const common::ObString &name);
   int set_sync_mode(const common::ObString &mode);
   int set_expr_text(const common::ObString &expr);
+  int set_arg_expr_text(const common::ObString &expr);
+  int set_dep_column_ids(const common::ObString &ids);
   int set_normalized_expr(const common::ObString &expr);
 
   const char *get_column_name() const { return column_name_; }
@@ -974,6 +977,8 @@ public:
   const char *get_ai_model_name() const { return ai_model_name_; }
   const char *get_sync_mode() const { return sync_mode_; }
   const char *get_expr_text() const { return expr_text_; }
+  const char *get_arg_expr_text() const { return arg_expr_text_; }
+  const char *get_dep_column_ids() const { return dep_column_ids_; }
   const char *get_normalized_expr() const { return normalized_expr_; }
   int64_t get_result_type() const { return result_type_; }
   int64_t get_vector_dim() const { return vector_dim_; }
@@ -981,7 +986,8 @@ public:
   TO_STRING_KV(K_(column_id), K_(max_retries), K_(result_type), K_(vector_dim),
                K_(state_column_id), K_(request_column_id), K_(result_spec_column_id),
                KCSTRING_(column_name), KCSTRING_(ai_func_name), KCSTRING_(ai_model_name),
-               KCSTRING_(sync_mode), KCSTRING_(expr_text), KCSTRING_(normalized_expr));
+               KCSTRING_(sync_mode), KCSTRING_(expr_text), KCSTRING_(arg_expr_text),
+               KCSTRING_(dep_column_ids), KCSTRING_(normalized_expr));
 
   uint64_t column_id_;
   uint64_t state_column_id_;
@@ -995,6 +1001,8 @@ public:
   char ai_model_name_[MAX_MODEL_LEN];
   char sync_mode_[MAX_MODE_LEN];
   char expr_text_[MAX_EXPR_LEN];
+  char arg_expr_text_[MAX_EXPR_LEN];
+  char dep_column_ids_[MAX_DEP_LEN];
   char normalized_expr_[MAX_EXPR_LEN];
 
 private:
