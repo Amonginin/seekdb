@@ -18,7 +18,6 @@
 
 #include "config_bridge.h"
 #include "sql/engine/dml/ob_table_insert_op.h"
-#include "sql/engine/dml/ob_ai_column_runtime.h"
 #include "sql/engine/dml/ob_dml_service.h"
 
 
@@ -231,15 +230,11 @@ OB_INLINE int ObTableInsertOp::insert_row_to_das()
       }
       if (OB_FAIL(ret)) {
         record_err_for_load_data(ret, ins_rtdef.cur_row_num_);
-      } else if (ins_ctdef.is_primary_index_) {
-        // Schedule the AI columns of this row in the transaction of the statement.
-        // A failure here must not fail the user's INSERT.
-        int task_ret = ObAiColumnRuntime::create_tasks_for_insert(*this, ins_ctdef, ins_ctdef.new_row_,
-                                                                  ctx_.get_allocator());
-        if (OB_FAIL(task_ret)) {
-          LOG_WARN("failed to schedule the ai column task", K(task_ret));
-        }
       }
+      // The AI column hook is not wired in yet. It runs an inner query and a
+      // nested session per row, which changed the behaviour of unrelated
+      // inserts, so it stays out of the statement until the rest of the
+      // pipeline (update, delete, worker) exists and can be verified.
     } // end for global index ctdef loop
     if (OB_SUCC(ret)) {
       int64_t insert_rows = is_skipped ? 0 : 1;
