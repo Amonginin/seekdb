@@ -388,7 +388,7 @@ int ObAiColumnResolver::check_no_ai_dependency(common::ObIAllocator &allocator,
         for (int64_t j = 0; OB_SUCC(ret) && j < ai_column_names.count(); ++j) {
           if (0 == refs.at(i).compare(ai_column_names.at(j))) {
             ret = OB_NOT_SUPPORTED;
-            LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN cannot depend on another AI column");
+            LOG_USER_ERROR(OB_NOT_SUPPORTED);
             break;
           }
         }
