@@ -213,6 +213,7 @@ int load_ai_columns(ObTableModifyOp &op,
 {
   int ret = OB_SUCCESS;
   char sql[4096];
+  ai_trace_impl("[ai] load enter v3 tables=%ld\n", table_ids.count());
   int64_t pos = snprintf(sql, sizeof(sql),
                          "select column_id, column_name, dep_column_ids, max_retries "
                          "from oceanbase.__all_ai_column where table_id in (");
@@ -291,6 +292,7 @@ int load_ai_columns(ObTableModifyOp &op,
       }
     }
   }
+  ai_trace_impl("[ai] load done v3 ret=%d metas=%ld\n", ret, metas.count());
   return ret;
 }
 
@@ -487,6 +489,7 @@ int ObAiColumnRuntime::flush_pending(ObTableModifyOp &op,
 {
   int ret = OB_SUCCESS;
   has_work = false;
+  ai_trace_impl("[ai] flush enter v3 pending=%ld\n", pending.count());
   if (pending.empty()) {
   } else {
     ObSEArray<uint64_t, 8> table_ids;
