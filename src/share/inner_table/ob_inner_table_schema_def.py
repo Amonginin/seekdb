@@ -2489,6 +2489,8 @@ all_ai_column_def = dict(
         ('expr_text', 'varchar:4096', 'true'),
         ('arg_expr_text', 'varchar:4096', 'true'),
         ('dep_column_ids', 'varchar:512', 'true'),
+        ('pk_column_ids', 'varchar:512', 'true'),
+        ('pk_column_names', 'varchar:512', 'true'),
         ('normalized_expr', 'varchar:8192', 'true'),
         ('result_type', 'int', 'false'),
         ('vector_dim', 'int', 'true'),

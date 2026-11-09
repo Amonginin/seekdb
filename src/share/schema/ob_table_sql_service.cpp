@@ -1135,6 +1135,10 @@ static int append_ai_column_metadata_row(ObDMLSqlSplicer &dml,
                                     ObHexEscapeSqlStr(ai_column.get_arg_expr_text())))) {
   } else if (OB_FAIL(dml.add_column("dep_column_ids",
                                     ObHexEscapeSqlStr(ai_column.get_dep_column_ids())))) {
+  } else if (OB_FAIL(dml.add_column("pk_column_ids",
+                                    ObHexEscapeSqlStr(ai_column.get_pk_column_ids())))) {
+  } else if (OB_FAIL(dml.add_column("pk_column_names",
+                                    ObHexEscapeSqlStr(ai_column.get_pk_column_names())))) {
   } else if (OB_FAIL(dml.add_column("normalized_expr",
                                     ObHexEscapeSqlStr(ai_column.get_normalized_expr())))) {
   } else if (OB_FAIL(dml.add_column("result_type", static_cast<int64_t>(ai_column.get_result_type())))) {

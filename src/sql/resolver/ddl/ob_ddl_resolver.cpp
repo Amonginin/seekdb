@@ -2360,6 +2360,8 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
   ObString expr_text;
   ObString arg_expr_text;
   ObString dep_column_ids;
+  ObString pk_column_ids;
+  ObString pk_column_names;
   ObString sync_mode;
   ObString normalized_expr;
   int64_t dim = OB_INVALID_ID;
@@ -2436,6 +2438,46 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     }
   }
 
+  // The rowkey lets the DML path build a row predicate without a schema lookup.
+  if (OB_SUCC(ret)) {
+    common::ObSEArray<uint64_t, 8> rowkey_ids;
+    char ids_buf[share::schema::ObAiColumnSchema::MAX_DEP_LEN];
+    char names_buf[share::schema::ObAiColumnSchema::MAX_DEP_LEN];
+    int64_t ids_pos = 0;
+    int64_t names_pos = 0;
+    if (OB_FAIL(table_schema->get_rowkey_info().get_column_ids(rowkey_ids))) {
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < rowkey_ids.count(); ++i) {
+        const ObColumnSchemaV2 *col = table_schema->get_column_schema(rowkey_ids.at(i));
+        if (OB_ISNULL(col)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("rowkey column is not found", K(ret), K(rowkey_ids.at(i)));
+        } else {
+          const int64_t id_written = snprintf(ids_buf + ids_pos, sizeof(ids_buf) - ids_pos,
+                                              "%s%lu", i == 0 ? "" : ",",
+                                              static_cast<unsigned long>(rowkey_ids.at(i)));
+          const int64_t name_written = snprintf(names_buf + names_pos, sizeof(names_buf) - names_pos,
+                                                "%s%s", i == 0 ? "" : ",", col->get_column_name());
+          if (OB_UNLIKELY(id_written <= 0 || name_written <= 0
+                          || ids_pos + id_written >= static_cast<int64_t>(sizeof(ids_buf))
+                          || names_pos + name_written >= static_cast<int64_t>(sizeof(names_buf)))) {
+            ret = OB_SIZE_OVERFLOW;
+            LOG_WARN("ai column rowkey list is too long", K(ret));
+          } else {
+            ids_pos += id_written;
+            names_pos += name_written;
+          }
+        }
+      }
+      if (OB_SUCC(ret) && ids_pos > 0) {
+        ret = ob_write_string(*allocator_, common::ObString(ids_pos, ids_buf), pk_column_ids);
+      }
+      if (OB_SUCC(ret) && names_pos > 0) {
+        ret = ob_write_string(*allocator_, common::ObString(names_pos, names_buf), pk_column_names);
+      }
+    }
+  }
+
   if (OB_SUCC(ret)) {
     ObDataType column_type;
     column_type.set_obj_type(column.get_data_type());
@@ -2462,6 +2504,8 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     } else if (OB_FAIL(ai_column.set_expr_text(expr_text))) {
     } else if (OB_FAIL(ai_column.set_arg_expr_text(arg_expr_text))) {
     } else if (OB_FAIL(ai_column.set_dep_column_ids(dep_column_ids))) {
+    } else if (OB_FAIL(ai_column.set_pk_column_ids(pk_column_ids))) {
+    } else if (OB_FAIL(ai_column.set_pk_column_names(pk_column_names))) {
     } else if (OB_FAIL(ai_column.set_normalized_expr(normalized_expr))) {
     } else if (OB_FAIL(table_schema->add_ai_column(ai_column))) {
     }

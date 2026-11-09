@@ -970,6 +970,8 @@ public:
   int set_expr_text(const common::ObString &expr);
   int set_arg_expr_text(const common::ObString &expr);
   int set_dep_column_ids(const common::ObString &ids);
+  int set_pk_column_ids(const common::ObString &ids);
+  int set_pk_column_names(const common::ObString &names);
   int set_normalized_expr(const common::ObString &expr);
 
   const char *get_column_name() const { return column_name_; }
@@ -979,6 +981,8 @@ public:
   const char *get_expr_text() const { return expr_text_; }
   const char *get_arg_expr_text() const { return arg_expr_text_; }
   const char *get_dep_column_ids() const { return dep_column_ids_; }
+  const char *get_pk_column_ids() const { return pk_column_ids_; }
+  const char *get_pk_column_names() const { return pk_column_names_; }
   const char *get_normalized_expr() const { return normalized_expr_; }
   int64_t get_result_type() const { return result_type_; }
   int64_t get_vector_dim() const { return vector_dim_; }
@@ -987,7 +991,8 @@ public:
                K_(state_column_id), K_(request_column_id), K_(result_spec_column_id),
                KCSTRING_(column_name), KCSTRING_(ai_func_name), KCSTRING_(ai_model_name),
                KCSTRING_(sync_mode), KCSTRING_(expr_text), KCSTRING_(arg_expr_text),
-               KCSTRING_(dep_column_ids), KCSTRING_(normalized_expr));
+               KCSTRING_(dep_column_ids), KCSTRING_(pk_column_ids),
+               KCSTRING_(pk_column_names), KCSTRING_(normalized_expr));
 
   uint64_t column_id_;
   uint64_t state_column_id_;
@@ -1003,6 +1008,8 @@ public:
   char expr_text_[MAX_EXPR_LEN];
   char arg_expr_text_[MAX_EXPR_LEN];
   char dep_column_ids_[MAX_DEP_LEN];
+  char pk_column_ids_[MAX_DEP_LEN];
+  char pk_column_names_[MAX_DEP_LEN];
   char normalized_expr_[MAX_EXPR_LEN];
 
 private:
