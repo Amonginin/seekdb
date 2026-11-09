@@ -2191,10 +2191,8 @@ int ObServer::init_server_runtime()
   if (OB_SUCC(ret)) {
     if (OB_FAIL(duty_task_.schedule(server_gtimer_))) {
     } else if (OB_FAIL(sql_mem_task_.schedule(sql_mem_timer_))) {
+    } else if (OB_FAIL(ai_column_worker_.schedule(server_gtimer_))) {
     }
-    // ai_column_worker_ stays unscheduled for now: it runs on the shared timer
-    // thread and reaches the sql proxy one second after the server starts,
-    // which is before the server is ready and takes the process down.
   }
 
   return ret;

@@ -310,6 +310,7 @@ int ObAiColumnRuntime::schedule_row(ObTableModifyOp &op,
     // system tables before __all_ai_column is created.
   } else if (OB_FAIL(has_ai_column(op, table_id, need_schedule))) {
   } else if (!need_schedule) {
+    LOG_INFO("table has no ai column", K(table_id));
   } else if (ObDmlEventType::DE_DELETING == event) {
     row = &ctdef.old_row_;
   } else {
@@ -325,6 +326,7 @@ int ObAiColumnRuntime::schedule_row(ObTableModifyOp &op,
     } else if (FALSE_IT(started = true)) {
     } else if (OB_FAIL(load_ai_columns(op, table_id, alloc, metas))) {
     } else if (metas.empty()) {
+      LOG_INFO("no ai column metadata row", K(table_id));
     } else {
       ObString rowkey_predicate;
       static std::atomic<int64_t> task_seq(0);
@@ -357,6 +359,9 @@ int ObAiColumnRuntime::schedule_row(ObTableModifyOp &op,
         if (OB_FAIL(op.execute_write(sql))) {
           LOG_WARN("failed to create the ai column task", K(ret), K(table_id),
                    K(meta.column_id_));
+        } else {
+          LOG_INFO("ai column task created", K(table_id), K(meta.column_id_),
+                   K(rowkey_predicate), KCSTRING(request_id));
         }
       }
     }
