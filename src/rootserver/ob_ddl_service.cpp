@@ -7830,6 +7830,7 @@ int ObDDLService::add_new_column_to_table_schema(
         } else if (OB_FAIL(bind_ai_column_for_add_column(alter_table_schema,
                                                          new_table_schema,
                                                          alter_column_schema,
+                                                         ddl_operator,
                                                          trans))) {
         }
       }
@@ -7846,6 +7847,7 @@ int ObDDLService::bind_ai_column_for_add_column(
     AlterTableSchema &alter_table_schema,
     ObTableSchema &new_table_schema,
     const AlterColumnSchema &alter_column_schema,
+    ObDDLOperator *ddl_operator,
     common::ObMySQLTransaction *trans)
 {
   int ret = OB_SUCCESS;
@@ -7871,7 +7873,10 @@ int ObDDLService::bind_ai_column_for_add_column(
   }
   if (OB_SUCC(ret) && found) {
     ObSchemaService *schema_service = NULL;
-    if (OB_FAIL(new_table_schema.add_ai_column(ai_column))) {
+    if (OB_FAIL(add_ai_hidden_columns_for_alter(new_table_schema, ai_column,
+                                                ddl_operator, trans))) {
+      LOG_WARN("failed to create the hidden columns of the ai column", K(ret));
+    } else if (OB_FAIL(new_table_schema.add_ai_column(ai_column))) {
       LOG_WARN("failed to add ai column metadata to the new table", K(ret));
     } else if (OB_ISNULL(schema_service = schema_service_->get_schema_service())) {
       ret = OB_ERR_UNEXPECTED;
@@ -7880,6 +7885,77 @@ int ObDDLService::bind_ai_column_for_add_column(
     } else if (OB_FAIL(schema_service->get_table_sql_service().add_single_ai_column_for_alter(
                  *trans, new_table_schema, ai_column))) {
       LOG_WARN("failed to persist ai column metadata", K(ret));
+    }
+  }
+  return ret;
+}
+
+// An AI column added by ALTER needs the same three hidden columns that CREATE
+// TABLE generates. Without them the state, request and result specification of
+// the column have nowhere to live, and the metadata row would carry an invalid
+// column id.
+int ObDDLService::add_ai_hidden_columns_for_alter(
+    ObTableSchema &new_table_schema,
+    ObAiColumnSchema &ai_column,
+    ObDDLOperator *ddl_operator,
+    common::ObMySQLTransaction *trans)
+{
+  int ret = OB_SUCCESS;
+  struct HiddenColDef
+  {
+    const char *prefix_;
+    common::ColumnType type_;
+    int64_t length_;
+    uint64_t *column_id_;
+  };
+  HiddenColDef defs[3] = {
+    {"__ai_state_", ObVarcharType, 16, &ai_column.state_column_id_},
+    {"__ai_req_", ObVarcharType, 64, &ai_column.request_column_id_},
+    {"__ai_spec_", ObVarcharType, 1024, &ai_column.result_spec_column_id_}
+  };
+  const int64_t max_len = OB_MAX_COLUMN_NAME_LENGTH - 1;
+  const ObString column_name = ObString::make_string(ai_column.get_column_name());
+  for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
+    ObColumnSchemaV2 hidden_col;
+    char name_buf[OB_MAX_COLUMN_NAME_LENGTH];
+    int64_t len = 0;
+    const ObString prefix = ObString::make_string(defs[i].prefix_);
+    hidden_col.reset();
+    for (int64_t k = 0; k < prefix.length() && len < max_len; ++k, ++len) {
+      name_buf[len] = prefix.ptr()[k];
+    }
+    for (int64_t k = 0; k < column_name.length() && len < max_len; ++k, ++len) {
+      name_buf[len] = column_name.ptr()[k];
+    }
+    name_buf[len] = '\0';
+    if (OB_UNLIKELY(0 == len)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("the hidden column name is empty", K(ret), K(i));
+    } else if (OB_FAIL(hidden_col.set_column_name(ObString(static_cast<int32_t>(len), name_buf)))) {
+    } else {
+      const uint64_t hidden_id = new_table_schema.get_max_used_column_id() + 1;
+      hidden_col.set_column_id(hidden_id);
+      hidden_col.set_data_type(defs[i].type_);
+      hidden_col.set_nullable(true);
+      hidden_col.set_is_hidden(true);
+      hidden_col.set_charset_type(CHARSET_UTF8MB4);
+      hidden_col.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+      hidden_col.set_accuracy(ObAccuracy(defs[i].length_));
+      hidden_col.set_table_id(new_table_schema.get_table_id());
+      if (OB_FAIL(new_table_schema.add_column(hidden_col))) {
+        LOG_WARN("failed to add the hidden column to the table", K(ret), K(hidden_id));
+      } else {
+        new_table_schema.set_max_used_column_id(hidden_id);
+        *(defs[i].column_id_) = hidden_id;
+        if (OB_NOT_NULL(ddl_operator) && OB_NOT_NULL(trans)) {
+          ObColumnSchemaV2 *stored = new_table_schema.get_column_schema(hidden_id);
+          if (OB_ISNULL(stored)) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (OB_FAIL(ddl_operator->insert_single_column(*trans, new_table_schema, *stored))) {
+            LOG_WARN("failed to persist the hidden column", K(ret), K(hidden_id));
+          }
+        }
+      }
     }
   }
   return ret;

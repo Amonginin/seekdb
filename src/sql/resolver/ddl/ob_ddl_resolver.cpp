@@ -2368,6 +2368,7 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
   int64_t max_retries = 0;
   ObAiColumnSchema ai_column;
   ObTableSchema *table_schema = NULL;
+  const ObTableSchema *lookup_table_schema = NULL;
   ObCreateTableStmt *create_table_stmt = nullptr;
   ObAlterTableStmt *alter_table_stmt = nullptr;
 
@@ -2386,6 +2387,20 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     } else {
       create_table_stmt = static_cast<ObCreateTableStmt*>(stmt_);
       table_schema = &create_table_stmt->get_create_table_arg().schema_;
+    }
+  }
+
+  // The metadata is stored on the schema above, but the column names, the
+  // rowkey and the dependencies must be looked up in the table that really
+  // exists: for ALTER that is the origin table, not the delta being applied.
+  if (OB_SUCC(ret)) {
+    const ObTableSchema *lookup_schema = NULL;
+    if (OB_FAIL(get_table_schema_for_check(lookup_schema))) {
+    } else if (OB_NOT_NULL(lookup_schema)) {
+      lookup_table_schema = lookup_schema;
+    }
+    if (OB_SUCC(ret) && OB_ISNULL(lookup_table_schema)) {
+      lookup_table_schema = table_schema;
     }
   }
 
@@ -2434,7 +2449,7 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
   // The dependency list lets the DML path decide whether an update is relevant.
   if (OB_SUCC(ret)) {
     if (OB_FAIL(ObAiColumnResolver::build_dependency_ids(*allocator_, ai_expr,
-                                                        *table_schema, dep_column_ids))) {
+                                                        *lookup_table_schema, dep_column_ids))) {
     }
   }
 
@@ -2445,10 +2460,10 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     char names_buf[share::schema::ObAiColumnSchema::MAX_DEP_LEN];
     int64_t ids_pos = 0;
     int64_t names_pos = 0;
-    if (OB_FAIL(table_schema->get_rowkey_info().get_column_ids(rowkey_ids))) {
+    if (OB_FAIL(lookup_table_schema->get_rowkey_info().get_column_ids(rowkey_ids))) {
     } else {
       for (int64_t i = 0; OB_SUCC(ret) && i < rowkey_ids.count(); ++i) {
-        const ObColumnSchemaV2 *col = table_schema->get_column_schema(rowkey_ids.at(i));
+        const ObColumnSchemaV2 *col = lookup_table_schema->get_column_schema(rowkey_ids.at(i));
         if (OB_ISNULL(col)) {
           // An ALTER builds its schema without carrying every column of the
           // base table, so a rowkey column may be missing here. The metadata is

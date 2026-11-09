@@ -239,6 +239,12 @@ public:
       share::schema::AlterTableSchema &alter_table_schema,
       share::schema::ObTableSchema &new_table_schema,
       const share::schema::AlterColumnSchema &alter_column_schema,
+      ObDDLOperator *ddl_operator,
+      common::ObMySQLTransaction *trans);
+  int add_ai_hidden_columns_for_alter(
+      share::schema::ObTableSchema &new_table_schema,
+      share::schema::ObAiColumnSchema &ai_column,
+      ObDDLOperator *ddl_operator,
       common::ObMySQLTransaction *trans);
   int gen_alter_column_new_table_schema_offline(
       const share::schema::ObTableSchema &origin_table_schema,
