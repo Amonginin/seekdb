@@ -306,6 +306,9 @@ public:
       common::ObISQLClient &sql_client,
       const ObTableSchema &table,
       const ObConstraint &cst);
+  int add_single_ai_column_for_alter(common::ObISQLClient &sql_client,
+      const ObTableSchema &table,
+      const ObAiColumnSchema &ai_column);
 
 private:
   // just modify __all_core_table/__all_table/__all_column/__all_table_history/__all_column_history/__all_ddl_operation

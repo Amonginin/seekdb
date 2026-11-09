@@ -2452,6 +2452,12 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
   if (OB_SUCC(ret)) {
     ObAiDiag::trace("AI resolver: before fill metadata\n");
     ai_column.column_id_ = column.get_column_id();
+    if (OB_INVALID_ID == ai_column.column_id_) {
+      // A column added by ALTER receives its column id in the DDL service after
+      // resolution. Keep a placeholder so the metadata can travel with the alter
+      // request; the DDL service binds it to the real id when it assigns one.
+      ai_column.column_id_ = 0;
+    }
     ai_column.max_retries_ = max_retries;
     ai_column.result_type_ = static_cast<int64_t>(column.get_data_type());
     ai_column.vector_dim_ = dim;

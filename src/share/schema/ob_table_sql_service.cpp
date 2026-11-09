@@ -1116,6 +1116,39 @@ int ObTableSqlService::add_columns_dml(
   return ret;
 }
 
+// Appends one row of __all_ai_column to a splicer shared by the caller.
+static int append_ai_column_metadata_row(ObDMLSqlSplicer &dml,
+                                         const ObTableSchema &table,
+                                         const ObAiColumnSchema &ai_column)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(dml.add_pk_column("table_id", table.get_table_id()))) {
+  } else if (OB_FAIL(dml.add_pk_column("column_id", ai_column.column_id_))) {
+  } else if (OB_FAIL(dml.add_column("column_name",
+                                    ObHexEscapeSqlStr(ai_column.get_column_name())))) {
+  } else if (OB_FAIL(dml.add_column("ai_func_name",
+                                    ObHexEscapeSqlStr(ai_column.get_ai_func_name())))) {
+  } else if (OB_FAIL(dml.add_column("model_name",
+                                    ObHexEscapeSqlStr(ai_column.get_ai_model_name())))) {
+  } else if (OB_FAIL(dml.add_column("expr_text",
+                                    ObHexEscapeSqlStr(ai_column.get_expr_text())))) {
+  } else if (OB_FAIL(dml.add_column("normalized_expr",
+                                    ObHexEscapeSqlStr(ai_column.get_normalized_expr())))) {
+  } else if (OB_FAIL(dml.add_column("result_type", static_cast<int64_t>(ai_column.get_result_type())))) {
+  } else if (OB_FAIL(dml.add_column("vector_dim", ai_column.get_vector_dim()))) {
+  } else if (OB_FAIL(dml.add_column("sync_mode",
+                                    ObHexEscapeSqlStr(ai_column.get_sync_mode())))) {
+  } else if (OB_FAIL(dml.add_column("max_retries", ai_column.max_retries_))) {
+  } else if (OB_FAIL(dml.add_column("state_column_id", ai_column.state_column_id_))) {
+  } else if (OB_FAIL(dml.add_column("request_column_id", ai_column.request_column_id_))) {
+  } else if (OB_FAIL(dml.add_column("result_spec_column_id", ai_column.result_spec_column_id_))) {
+  } else if (OB_FAIL(dml.add_column("status",
+                                    static_cast<int64_t>(ObAiColumnSchema::AI_COLUMN_STATUS_VALID)))) {
+  } else if (OB_FAIL(dml.finish_row())) {
+  }
+  return ret;
+}
+
 // Writes the metadata of the AI columns of a table into __all_ai_column. The
 // rows are written in the same transaction as the table itself, so a table
 // and its AI column metadata always appear together.
@@ -1132,29 +1165,7 @@ int ObTableSqlService::batch_add_ai_columns_for_create_table(common::ObISQLClien
       if (OB_ISNULL(ai_column)) {
         continue;
       }
-      if (OB_FAIL(dml.add_pk_column("table_id", table.get_table_id()))) {
-      } else if (OB_FAIL(dml.add_pk_column("column_id", ai_column->column_id_))) {
-      } else if (OB_FAIL(dml.add_column("column_name",
-                                        ObHexEscapeSqlStr(ai_column->get_column_name())))) {
-      } else if (OB_FAIL(dml.add_column("ai_func_name",
-                                        ObHexEscapeSqlStr(ai_column->get_ai_func_name())))) {
-      } else if (OB_FAIL(dml.add_column("model_name",
-                                        ObHexEscapeSqlStr(ai_column->get_ai_model_name())))) {
-      } else if (OB_FAIL(dml.add_column("expr_text",
-                                        ObHexEscapeSqlStr(ai_column->get_expr_text())))) {
-      } else if (OB_FAIL(dml.add_column("normalized_expr",
-                                        ObHexEscapeSqlStr(ai_column->get_normalized_expr())))) {
-      } else if (OB_FAIL(dml.add_column("result_type", static_cast<int64_t>(ai_column->get_result_type())))) {
-      } else if (OB_FAIL(dml.add_column("vector_dim", ai_column->get_vector_dim()))) {
-      } else if (OB_FAIL(dml.add_column("sync_mode",
-                                        ObHexEscapeSqlStr(ai_column->get_sync_mode())))) {
-      } else if (OB_FAIL(dml.add_column("max_retries", ai_column->max_retries_))) {
-      } else if (OB_FAIL(dml.add_column("state_column_id", ai_column->state_column_id_))) {
-      } else if (OB_FAIL(dml.add_column("request_column_id", ai_column->request_column_id_))) {
-      } else if (OB_FAIL(dml.add_column("result_spec_column_id", ai_column->result_spec_column_id_))) {
-      } else if (OB_FAIL(dml.add_column("status",
-                                        static_cast<int64_t>(ObAiColumnSchema::AI_COLUMN_STATUS_VALID)))) {
-      } else if (OB_FAIL(dml.finish_row())) {
+      if (OB_FAIL(append_ai_column_metadata_row(dml, table, *ai_column))) {
       } else {
         row_count++;
       }
@@ -1168,6 +1179,24 @@ int ObTableSqlService::batch_add_ai_columns_for_create_table(common::ObISQLClien
     } else {
       ObAiDiag::trace("AI sql service: exec_dml ok rows=%ld\n", row_count);
     }
+  }
+  return ret;
+}
+
+// Writes one AI column metadata row when a column is added by ALTER TABLE. The
+// row shares the transaction of the ALTER, so it becomes visible together with
+// the new column.
+int ObTableSqlService::add_single_ai_column_for_alter(common::ObISQLClient &sql_client,
+    const ObTableSchema &table,
+    const ObAiColumnSchema &ai_column)
+{
+  int ret = OB_SUCCESS;
+  ObDMLSqlSplicer dml;
+  const int64_t row_count = 1;
+  if (OB_FAIL(append_ai_column_metadata_row(dml, table, ai_column))) {
+    LOG_WARN("failed to build ai column metadata row", KR(ret), K(table.get_table_id()));
+  } else if (OB_FAIL(exec_dml(sql_client, OB_ALL_AI_COLUMN_TNAME, dml, row_count))) {
+    LOG_WARN("failed to insert ai column metadata", KR(ret), K(row_count));
   }
   return ret;
 }

@@ -7729,7 +7729,7 @@ int ObDDLService::drop_column_update_new_table(
 // update relevant inner table if all of schema_guard, ddl_operator and trans are not null
 int ObDDLService::add_new_column_to_table_schema(
     const ObTableSchema &origin_table_schema,
-    const AlterTableSchema &alter_table_schema,
+    AlterTableSchema &alter_table_schema,
     const common::ObTimeZoneInfoWrap &tz_info_wrap,
     share::ObLocalSessionVar &local_session_var,
     common::ObIAllocator &allocator,
@@ -7827,8 +7827,59 @@ int ObDDLService::add_new_column_to_table_schema(
       if (update_inner_table) {
         if (OB_FAIL(ddl_operator->insert_single_column(*trans,
                 new_table_schema, alter_column_schema))) {
+        } else if (OB_FAIL(bind_ai_column_for_add_column(alter_table_schema,
+                                                         new_table_schema,
+                                                         alter_column_schema,
+                                                         trans))) {
         }
       }
+    }
+  }
+  return ret;
+}
+
+// An AI column added by ALTER gets its column id only here, after the resolver
+// has already stored the metadata on the alter table schema. Bind the metadata
+// to the real column id and persist the row in the same transaction as the
+// column, so a table and its AI column metadata always appear together.
+int ObDDLService::bind_ai_column_for_add_column(
+    AlterTableSchema &alter_table_schema,
+    ObTableSchema &new_table_schema,
+    const AlterColumnSchema &alter_column_schema,
+    common::ObMySQLTransaction *trans)
+{
+  int ret = OB_SUCCESS;
+  const ObString column_name = alter_column_schema.get_column_name_str();
+  ObAiColumnSchema ai_column;
+  bool found = false;
+  for (int64_t i = 0; OB_SUCC(ret) && !found && i < alter_table_schema.get_ai_column_count(); ++i) {
+    const ObAiColumnSchema *candidate = alter_table_schema.get_ai_column(i);
+    if (OB_ISNULL(candidate)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("ai column metadata is null", K(ret), K(i));
+    } else if (OB_ISNULL(candidate->get_column_name())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("ai column name is null", K(ret), K(i));
+    } else if (0 == column_name.compare(ObString::make_string(candidate->get_column_name()))) {
+      if (OB_FAIL(ai_column.assign(*candidate))) {
+        LOG_WARN("failed to copy ai column metadata", K(ret));
+      } else {
+        ai_column.column_id_ = alter_column_schema.get_column_id();
+        found = true;
+      }
+    }
+  }
+  if (OB_SUCC(ret) && found) {
+    ObSchemaService *schema_service = NULL;
+    if (OB_FAIL(new_table_schema.add_ai_column(ai_column))) {
+      LOG_WARN("failed to add ai column metadata to the new table", K(ret));
+    } else if (OB_ISNULL(schema_service = schema_service_->get_schema_service())) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_ISNULL(trans)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(schema_service->get_table_sql_service().add_single_ai_column_for_alter(
+                 *trans, new_table_schema, ai_column))) {
+      LOG_WARN("failed to persist ai column metadata", K(ret));
     }
   }
   return ret;
@@ -8230,7 +8281,7 @@ int ObDDLService::update_prev_id_and_add_column_(
 }
 
 int ObDDLService::alter_table_column(const ObTableSchema &origin_table_schema,
-                                     const AlterTableSchema &alter_table_schema,
+                                     AlterTableSchema &alter_table_schema,
                                      ObTableSchema &new_table_schema,
                                      obcall::ObAlterTableArg &alter_table_arg,
                                      ObSchemaGetterGuard &schema_guard,
@@ -11606,7 +11657,7 @@ int ObDDLService::add_not_null_column_to_table_schema(
 {
   int ret = OB_SUCCESS;
   
-  const AlterTableSchema &alter_table_schema = alter_table_arg.alter_table_schema_;
+  AlterTableSchema &alter_table_schema = alter_table_arg.alter_table_schema_;
   AlterColumnSchema *alter_column_schema = nullptr;
   ObSEArray<ObString, 4> gen_col_expr_arr;
   share::schema::ObTableSchema::const_column_iterator iter = origin_table_schema.column_begin();

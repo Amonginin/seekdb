@@ -213,7 +213,7 @@ public:
                          share::ObIDGenerator *batch_id_generator = NULL);
   int alter_table_column(
       const share::schema::ObTableSchema &origin_table_schema,
-      const share::schema::AlterTableSchema & alter_table_schema,
+      share::schema::AlterTableSchema &alter_table_schema,
       share::schema::ObTableSchema &new_table_schema,
       obcall::ObAlterTableArg &alter_table_arg,
       share::schema::ObSchemaGetterGuard &schema_guard,
@@ -224,7 +224,7 @@ public:
       ObTableSchema &new_table_schema);
   int add_new_column_to_table_schema(
       const share::schema::ObTableSchema &origin_table_schema,
-      const share::schema::AlterTableSchema &alter_table_schema,
+      share::schema::AlterTableSchema &alter_table_schema,
       const common::ObTimeZoneInfoWrap &tz_info_wrap,
       share::ObLocalSessionVar &local_session_var,
       common::ObIAllocator &allocator,
@@ -234,6 +234,11 @@ public:
       share::schema::ObSchemaGetterGuard &schema_guard,
       uint64_t &curr_udt_set_id,
       ObDDLOperator *ddl_operator,
+      common::ObMySQLTransaction *trans);
+  int bind_ai_column_for_add_column(
+      share::schema::AlterTableSchema &alter_table_schema,
+      share::schema::ObTableSchema &new_table_schema,
+      const share::schema::AlterColumnSchema &alter_column_schema,
       common::ObMySQLTransaction *trans);
   int gen_alter_column_new_table_schema_offline(
       const share::schema::ObTableSchema &origin_table_schema,
