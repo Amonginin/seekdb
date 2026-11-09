@@ -9,6 +9,7 @@
 
 #include "common/mysqlclient/ob_mysql_proxy.h"
 #include "lib/time/ob_time_utility.h"
+#include "lib/utility/ob_print_utils.h"
 #include "share/ob_errno.h"
 #include "share/schema/ob_schema_getter_guard.h"
 #include "share/schema/ob_schema_struct.h"
@@ -16,6 +17,7 @@
 #include "sql/engine/dml/ob_dml_ctx_define.h"
 #include "sql/engine/dml/ob_table_modify_op.h"
 #include "sql/engine/expr/ob_expr.h"
+#include "sql/ob_sql_context.h"
 
 namespace oceanbase
 {
@@ -164,7 +166,7 @@ int collect_changed_ids(ObTableModifyOp &op,
       if (OB_FAIL(ctdef.old_row_.at(i)->eval(eval_ctx, old_datum))) {
       } else if (OB_FAIL(ctdef.new_row_.at(i)->eval(eval_ctx, new_datum))) {
       } else if (OB_NOT_NULL(old_datum) && OB_NOT_NULL(new_datum)) {
-        changed = (0 != old_datum->compare(*new_datum, ctdef.old_row_.at(i)->datum_meta_));
+        changed = !ObDatum::binary_equal(*old_datum, *new_datum);
       }
     }
     if (OB_SUCC(ret) && changed) {
@@ -229,7 +231,7 @@ int load_ai_columns(ObTableModifyOp &op,
   } else if (OB_FAIL(op.open_inner_conn())) {
   } else {
     SMART_VAR(common::ObMySQLProxy::MySQLResult, res) {
-      ObMySQLResult *result = NULL;
+      sqlclient::ObMySQLResult *result = NULL;
       bool started = false;
       sql[pos] = '\0';
       if (OB_FAIL(op.begin_nested_session(false))) {
@@ -243,10 +245,10 @@ int load_ai_columns(ObTableModifyOp &op,
             AiColumnMeta meta;
             ObString column_name;
             ObString dep_ids;
-            if (OB_FAIL(result->get_uint(0, meta.column_id_))) {
-            } else if (OB_FAIL(result->get_varchar(1, column_name))) {
-            } else if (OB_FAIL(result->get_varchar(2, dep_ids))) {
-            } else if (OB_FAIL(result->get_int(3, meta.max_retries_))) {
+            if (OB_FAIL(result->get_uint(static_cast<int64_t>(0), meta.column_id_))) {
+            } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(1), column_name))) {
+            } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(2), dep_ids))) {
+            } else if (OB_FAIL(result->get_int(static_cast<int64_t>(3), meta.max_retries_))) {
             } else if (OB_FAIL(ob_write_string(alloc, column_name, meta.column_name_))) {
             } else if (OB_FAIL(ob_write_string(alloc, dep_ids, meta.dep_column_ids_))) {
             } else if (OB_FAIL(metas.push_back(meta))) {

@@ -623,7 +623,6 @@ ObTableModifyOp::ObTableModifyOp(ObExecContext &ctx,
     dml_rtctx_(eval_ctx_, ctx, *this),
     execute_single_row_(false),
     dml_modify_rows_(ctx.get_allocator()),
-    ai_pending_rows_(ctx.get_allocator()),
     last_store_row_(),
     saved_session_(NULL)
 {
