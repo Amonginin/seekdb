@@ -276,19 +276,35 @@ stage_test() {
 
   # 起库
   rm -rf /tmp/sdb && mkdir -p /tmp/sdb
-  "${SRC_DIR}/build_release/src/observer/seekdb" --base-dir /tmp/sdb --port 2881 --nodaemon \
-    > /tmp/sdb/server.log 2>&1 &
-  sleep 20
+  local bin="${SRC_DIR}/build_release/src/observer/seekdb"
+  if [ ! -x "${bin}" ]; then
+    die "二进制不存在：${bin}。先跑 bash $0 build"
+  fi
+  "${bin}" --base-dir /tmp/sdb --port 2881 --nodaemon > /tmp/sdb/server.log 2>&1 &
+  local server_pid=$!
 
-  python3 - <<'PY'
-import pymysql
-try:
-    c = pymysql.connect(host='127.0.0.1', port=2881, user='root', password='', autocommit=True)
-    c.cursor().execute('select 1')
-    print("  ✓ 实例已就绪")
-except Exception as e:
-    print("  ✗ 实例连接失败:", str(e)[:200])
-PY
+  # 等端口真的可连，不要固定 sleep，实例可能起得比 20 秒慢。
+  local waited=0
+  local up=0
+  while [ ${waited} -lt 90 ]; do
+    if (exec 3<>/dev/tcp/127.0.0.1/2881) 2>/dev/null; then
+      up=1
+      break
+    fi
+    if ! kill -0 ${server_pid} 2>/dev/null; then
+      break
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  if [ ${up} -ne 1 ]; then
+    info "实例没起来，server.log 末尾："
+    tail -40 /tmp/sdb/server.log
+    die "实例启动失败（等了 ${waited}s）"
+  fi
+  info "✓ 实例已就绪（耗时 ${waited}s）"
+
+  # 连不上的话再跑测例只会得到一堆无意义的 exit=1，所以在上面直接 die。
 
   # 跑 B1（已知通过，做回归）
   run_case ai_function ai_function_enhancement
