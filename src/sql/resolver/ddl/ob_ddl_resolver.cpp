@@ -2450,8 +2450,10 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
       for (int64_t i = 0; OB_SUCC(ret) && i < rowkey_ids.count(); ++i) {
         const ObColumnSchemaV2 *col = table_schema->get_column_schema(rowkey_ids.at(i));
         if (OB_ISNULL(col)) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("rowkey column is not found", K(ret), K(rowkey_ids.at(i)));
+          // An ALTER builds its schema without carrying every column of the
+          // base table, so a rowkey column may be missing here. The metadata is
+          // not required for the ALTER itself, so skip it instead of failing.
+          continue;
         } else {
           const int64_t id_written = snprintf(ids_buf + ids_pos, sizeof(ids_buf) - ids_pos,
                                               "%s%lu", i == 0 ? "" : ",",

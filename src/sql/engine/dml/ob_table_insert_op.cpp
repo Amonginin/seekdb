@@ -226,15 +226,14 @@ OB_INLINE int ObTableInsertOp::insert_row_to_das()
                                                                 tablet_loc->tablet_id_,
                                                                 eval_ctx_))) {
       } else if (OB_FAIL(ObDMLService::insert_row(ins_ctdef, ins_rtdef, tablet_loc, dml_rtctx_, modify_row.new_row_))) {
-      } else if (need_after_row_process(ins_ctdef) && OB_FAIL(dml_modify_rows_.push_back(modify_row))) {
+      } else if (ins_ctdef.is_primary_index_ && OB_FAIL(dml_modify_rows_.push_back(modify_row))) {
+        // The AI column task rows are written from the after-row phase. Push
+        // unconditionally here so that phase can see the row; it decides from
+        // the schema whether there is anything to do.
       }
       if (OB_FAIL(ret)) {
         record_err_for_load_data(ret, ins_rtdef.cur_row_num_);
       }
-      // The AI column hook is not wired in yet. It runs an inner query and a
-      // nested session per row, which changed the behaviour of unrelated
-      // inserts, so it stays out of the statement until the rest of the
-      // pipeline (update, delete, worker) exists and can be verified.
     } // end for global index ctdef loop
     if (OB_SUCC(ret)) {
       int64_t insert_rows = is_skipped ? 0 : 1;

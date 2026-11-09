@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 #include "config_bridge.h"
 #include "sql/engine/dml/ob_dml_service.h"
+#include "sql/engine/dml/ob_ai_column_runtime.h"
 #include "sql/engine/expr/ob_datum_cast.h"
 #include "share/rc/ob_server_runtime.h"
 #include "sql/das/ob_das_insert_op.h"
@@ -2218,6 +2219,15 @@ int ObDMLService::handle_after_processing_single_row(ObDMLModifyRowNode &modify_
       }
     }
     if (OB_SUCC(ret) && OB_FAIL(TriggerHandle::do_handle_after_row(op, dml_ctdef.trig_ctdef_, dml_rtdef.trig_rtdef_, dml_event))) {
+    }
+    if (OB_SUCC(ret) && !is_inner_table(dml_ctdef.das_base_ctdef_.index_tid_)) {
+      // Schedule the AI columns here, not in the insert loop: at this point the
+      // DAS buffer of the statement is written, which is the same condition the
+      // foreign key checks rely on for their nested session.
+      int ai_ret = ObAiColumnRuntime::schedule_row(op, dml_ctdef, static_cast<int64_t>(dml_event));
+      if (OB_FAIL(ai_ret)) {
+        LOG_WARN("failed to schedule the ai column task", K(ai_ret));
+      }
     }
   }
   return ret;
