@@ -2191,6 +2191,7 @@ int ObServer::init_server_runtime()
   if (OB_SUCC(ret)) {
     if (OB_FAIL(duty_task_.schedule(server_gtimer_))) {
     } else if (OB_FAIL(sql_mem_task_.schedule(sql_mem_timer_))) {
+    } else if (OB_FAIL(ai_column_worker_.schedule(server_gtimer_))) {
     }
   }
 

@@ -317,6 +317,7 @@ SQL_UNITY_GROUPS = [
         language = "c++",
         srcs = [
             "src/sql/engine/dml/ob_ai_column_runtime.cpp",
+            "src/sql/engine/dml/ob_ai_column_worker.cpp",
             "src/sql/engine/dml/ob_conflict_checker.cpp",
             "src/sql/engine/dml/ob_dml_ctx_define.cpp",
             "src/sql/engine/dml/ob_dml_service.cpp",

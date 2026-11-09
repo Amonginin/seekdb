@@ -33,6 +33,7 @@
 #include "sql/ob_sql.h"
 #include "sql/das/ob_data_access_service.h"
 #include "sql/engine/px/ob_ddl_slice_store.h"
+#include "sql/engine/dml/ob_ai_column_worker.h"
 #include "sql/session/ob_user_resource_mgr.h"
 #include "data_plane/ob_i_memory_pressure_service.h"
 
@@ -485,6 +486,7 @@ private:
   common::ObTimer ctas_clean_up_timer_;
   ObServerDutyTask duty_task_;
   ObSqlMemoryTimerTask sql_mem_task_;
+  sql::ObAiColumnWorker ai_column_worker_;
   ObCTASCleanUpTask ctas_clean_up_task_;     // repeat & no retry
   ObRedefTableHeartBeatTask redef_table_heart_beat_task_;
   ObRefreshCpuFreqTimeTask refresh_cpu_frequency_task_;
