@@ -285,6 +285,24 @@ int dependency_changed(ObTableModifyOp &op,
 
 } // namespace
 
+void ObAiColumnRuntime::trace(const char *fmt, ...)
+{
+  int fd = ::open("/tmp/aidbg.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+  if (fd >= 0) {
+    char buf[512];
+    va_list args;
+    va_start(args, fmt);
+    const int len = vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    if (len > 0) {
+      const int to_write = len < static_cast<int>(sizeof(buf)) ? len : static_cast<int>(sizeof(buf));
+      const ssize_t ignored = ::write(fd, buf, static_cast<size_t>(to_write));
+      UNUSED(ignored);
+    }
+    ::close(fd);
+  }
+}
+
 int ObAiColumnRuntime::has_ai_column(ObTableModifyOp &op,
                                      const uint64_t table_id,
                                      bool &has_ai_column)

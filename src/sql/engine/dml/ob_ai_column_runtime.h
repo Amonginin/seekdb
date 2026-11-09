@@ -40,6 +40,10 @@ public:
   static int has_ai_column(ObTableModifyOp &op,
                            const uint64_t table_id,
                            bool &has_ai_column);
+
+  // Writes one line to /tmp/aidbg.log. The build drops the log lines this
+  // module produces, so a direct write is the only channel that lands.
+  static void trace(const char *fmt, ...);
 };
 
 } // namespace sql

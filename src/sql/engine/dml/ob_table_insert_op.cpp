@@ -18,6 +18,7 @@
 
 #include "config_bridge.h"
 #include "sql/engine/dml/ob_table_insert_op.h"
+#include "sql/engine/dml/ob_ai_column_runtime.h"
 #include "sql/engine/dml/ob_dml_service.h"
 
 
@@ -230,6 +231,8 @@ OB_INLINE int ObTableInsertOp::insert_row_to_das()
         // The AI column task rows are written from the after-row phase. Push
         // unconditionally here so that phase can see the row; it decides from
         // the schema whether there is anything to do.
+      } else if (ins_ctdef.is_primary_index_) {
+        ObAiColumnRuntime::trace("[ai] row queued\n");
       }
       if (OB_FAIL(ret)) {
         record_err_for_load_data(ret, ins_rtdef.cur_row_num_);
