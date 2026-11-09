@@ -276,6 +276,10 @@ stage_test() {
   info "✓ mock 已启动（ai_column:19120, ai_function:8000）"
 
   # 起库
+  # 上一轮的服务进程必须先停掉：下面会删掉它正在用的数据目录，
+  # 留着它还会占住 2881，新实例绑不上端口，测试就会在握手阶段断连。
+  pkill -f "seekdb --base-dir" 2>/dev/null
+  sleep 3
   rm -rf /tmp/sdb && mkdir -p /tmp/sdb
   local bin="${SRC_DIR}/build_release/src/observer/seekdb"
   if [ ! -x "${bin}" ]; then
@@ -302,6 +306,12 @@ stage_test() {
     info "实例没起来，server.log 末尾："
     tail -40 /tmp/sdb/server.log
     die "实例启动失败（等了 ${waited}s）"
+  fi
+  if ! kill -0 ${server_pid} 2>/dev/null; then
+    # 端口是通的但不是我们启动的进程，说明有残留实例占着 2881。
+    info "端口 2881 被其他进程占用，我们启动的实例已退出。server.log 末尾："
+    tail -40 /tmp/sdb/server.log
+    die "实例启动失败（端口被占用）"
   fi
   info "✓ 实例已就绪（耗时 ${waited}s）"
 

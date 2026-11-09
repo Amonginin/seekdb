@@ -214,7 +214,7 @@ int ObAiColumnWorker::schedule(common::ObTimer &timer)
 
 void ObAiColumnWorker::runTimerTask()
 {
-  const int ret = run_once();
+  int ret = run_once();
   if (OB_FAIL(ret)) {
     LOG_WARN("ai column worker round failed", K(ret));
   }
