@@ -2,6 +2,7 @@
 
 #include "lib/container/ob_se_array.h"
 #include "lib/string/ob_string.h"
+#include "query/api/query/engine/expr/ob_expr.h"
 
 namespace oceanbase
 {
@@ -28,7 +29,7 @@ public:
   // the insert, in the layout of `ctdef.column_ids_`.
   static int create_tasks_for_insert(ObTableModifyOp &op,
                                      const ObDMLBaseCtDef &ctdef,
-                                     const common::ObIArray<ObExpr *> &row,
+                                     const ExprFixedArray &row,
                                      common::ObIAllocator &alloc);
 };
 

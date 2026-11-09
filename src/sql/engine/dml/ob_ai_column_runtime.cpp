@@ -16,6 +16,8 @@ namespace oceanbase
 {
 namespace sql
 {
+using common::ObString;
+using common::ObMySQLProxy;
 namespace
 {
 
@@ -91,8 +93,8 @@ int split_column_names(common::ObIAllocator &alloc,
 }
 
 // Reads the AI column definitions of one table. The metadata lives in an inner
-// table, so the read goes through a nested session and shares the transaction
-// of the running statement.
+// table, so the read goes through the nested session of the caller and shares
+// the transaction of the running statement.
 int load_ai_columns(ObTableModifyOp &op,
                     const uint64_t table_id,
                     common::ObIAllocator &alloc,
@@ -105,57 +107,43 @@ int load_ai_columns(ObTableModifyOp &op,
            "max_retries, result_type, state_column_id, request_column_id "
            "from oceanbase.__all_ai_column where table_id = %lu",
            static_cast<unsigned long>(table_id));
-  if (OB_FAIL(op.open_inner_conn())) {
-  } else {
-    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
-      common::ObMySQLResult *result = NULL;
-      bool started = false;
-      if (OB_FAIL(op.begin_nested_session(false))) {
-      } else {
-        started = true;
-        if (OB_FAIL(op.execute_read(sql, res))) {
-        } else if (OB_ISNULL(result = res.get_result())) {
-          ret = OB_ERR_UNEXPECTED;
-        } else {
-          while (OB_SUCC(ret) && OB_SUCC(result->next())) {
-            AiColumnMeta meta;
-            ObString column_name;
-            ObString pk_column_ids;
-            ObString pk_column_names;
-            ObString sync_mode;
-            if (OB_FAIL(result->get_uint(0, meta.column_id_))) {
-            } else if (OB_FAIL(result->get_varchar(1, column_name))) {
-            } else if (OB_FAIL(result->get_varchar(2, pk_column_ids))) {
-            } else if (OB_FAIL(result->get_varchar(3, pk_column_names))) {
-            } else if (OB_FAIL(result->get_varchar(4, sync_mode))) {
-            } else if (OB_FAIL(result->get_int(5, meta.max_retries_))) {
-            } else if (OB_FAIL(result->get_int(6, meta.result_type_))) {
-            } else if (OB_FAIL(result->get_uint(7, meta.state_column_id_))) {
-            } else if (OB_FAIL(result->get_uint(8, meta.request_column_id_))) {
-            } else if (OB_FAIL(ob_write_string(alloc, column_name, meta.column_name_))) {
-            } else if (OB_FAIL(ob_write_string(alloc, pk_column_ids, meta.pk_column_ids_))) {
-            } else if (OB_FAIL(ob_write_string(alloc, pk_column_names, meta.pk_column_names_))) {
-            } else if (OB_FAIL(ob_write_string(alloc, sync_mode, meta.sync_mode_))) {
-            } else if (OB_FAIL(metas.push_back(meta))) {
-            }
-          }
-          if (OB_ITER_END == ret) {
-            ret = OB_SUCCESS;
-          }
+  SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+    sqlclient::ObMySQLResult *result = NULL;
+    if (OB_FAIL(op.execute_read(sql, res))) {
+    } else if (OB_ISNULL(result = res.get_result())) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      while (OB_SUCC(ret) && OB_SUCC(result->next())) {
+        AiColumnMeta meta;
+        ObString column_name;
+        ObString pk_column_ids;
+        ObString pk_column_names;
+        ObString sync_mode;
+        if (OB_FAIL(result->get_uint(0, meta.column_id_))) {
+        } else if (OB_FAIL(result->get_varchar(1, column_name))) {
+        } else if (OB_FAIL(result->get_varchar(2, pk_column_ids))) {
+        } else if (OB_FAIL(result->get_varchar(3, pk_column_names))) {
+        } else if (OB_FAIL(result->get_varchar(4, sync_mode))) {
+        } else if (OB_FAIL(result->get_int(5, meta.max_retries_))) {
+        } else if (OB_FAIL(result->get_int(6, meta.result_type_))) {
+        } else if (OB_FAIL(result->get_uint(7, meta.state_column_id_))) {
+        } else if (OB_FAIL(result->get_uint(8, meta.request_column_id_))) {
+        } else if (OB_FAIL(ob_write_string(alloc, column_name, meta.column_name_))) {
+        } else if (OB_FAIL(ob_write_string(alloc, pk_column_ids, meta.pk_column_ids_))) {
+        } else if (OB_FAIL(ob_write_string(alloc, pk_column_names, meta.pk_column_names_))) {
+        } else if (OB_FAIL(ob_write_string(alloc, sync_mode, meta.sync_mode_))) {
+        } else if (OB_FAIL(metas.push_back(meta))) {
         }
-        int close_ret = OB_SUCCESS;
-        if (OB_NOT_NULL(result)) {
-          close_ret = result->close();
-          if (OB_SUCCESS != close_ret && OB_SUCC(ret)) {
-            ret = close_ret;
-          }
-        }
-        if (started) {
-          int end_ret = op.end_nested_session();
-          if (OB_SUCCESS != end_ret && OB_SUCC(ret)) {
-            ret = end_ret;
-          }
-        }
+      }
+      if (OB_ITER_END == ret) {
+        ret = OB_SUCCESS;
+      }
+    }
+    int close_ret = OB_SUCCESS;
+    if (OB_NOT_NULL(result)) {
+      close_ret = result->close();
+      if (OB_SUCCESS != close_ret && OB_SUCC(ret)) {
+        ret = close_ret;
       }
     }
   }
@@ -166,7 +154,7 @@ int load_ai_columns(ObTableModifyOp &op,
 int build_rowkey_predicate(ObTableModifyOp &op,
                            const ObDMLBaseCtDef &ctdef,
                            const AiColumnMeta &meta,
-                           const common::ObIArray<ObExpr *> &row,
+                           const ExprFixedArray &row,
                            common::ObIAllocator &alloc,
                            ObString &predicate)
 {
@@ -206,9 +194,9 @@ int build_rowkey_predicate(ObTableModifyOp &op,
     }
   }
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(ForeignKeyHandle::gen_where(op.get_eval_ctx(), where_buf, where_len,
-                                            where_pos, pk_columns, row, alloc,
-                                            op.get_obj_print_params()))) {
+    if (OB_FAIL(ForeignKeyHandle::gen_row_predicate(op.get_eval_ctx(), where_buf, where_len,
+                                                    where_pos, pk_columns, row, alloc,
+                                                    op.get_obj_print_params()))) {
     } else if (OB_ISNULL(where_buf) || where_pos <= 1) {
       ret = OB_ERR_UNEXPECTED;
     } else {
@@ -223,41 +211,53 @@ int build_rowkey_predicate(ObTableModifyOp &op,
 
 int ObAiColumnRuntime::create_tasks_for_insert(ObTableModifyOp &op,
                                                const ObDMLBaseCtDef &ctdef,
-                                               const common::ObIArray<ObExpr *> &row,
+                                               const ExprFixedArray &row,
                                                common::ObIAllocator &alloc)
 {
   int ret = OB_SUCCESS;
   const uint64_t table_id = ctdef.das_base_ctdef_.index_tid_;
   ObSEArray<AiColumnMeta, 8> metas;
-  if (OB_FAIL(load_ai_columns(op, table_id, alloc, metas))) {
-  } else if (metas.empty()) {
-    // The table has no AI column, nothing to schedule.
+  bool started = false;
+  if (OB_FAIL(op.ensure_inner_conn())) {
+  } else if (OB_FAIL(op.begin_nested_session(false))) {
   } else {
-    ObString rowkey_predicate;
-    if (OB_FAIL(build_rowkey_predicate(op, ctdef, metas.at(0), row, alloc, rowkey_predicate))) {
+    started = true;
+    if (OB_FAIL(load_ai_columns(op, table_id, alloc, metas))) {
+    } else if (metas.empty()) {
+      // The table has no AI column, nothing to schedule.
     } else {
-      static std::atomic<int64_t> task_seq(0);
-      int64_t seq = task_seq.fetch_add(1, std::memory_order_relaxed);
-      char request_id[64];
-      snprintf(request_id, sizeof(request_id), "%ld-%ld",
-               ObTimeUtility::current_time(), static_cast<long>(seq));
-      for (int64_t i = 0; OB_SUCC(ret) && i < metas.count(); ++i) {
-        const AiColumnMeta &meta = metas.at(i);
-        char sql[2048];
-        snprintf(sql, sizeof(sql),
-                 "insert into %s (table_id, request_id, column_id, column_name, "
-                 "rowkey_predicate, state, retry_count, eligible_ts) "
-                 "values (%lu, '%s', %lu, '%.*s', '%.*s', 0, 0, now())",
-                 AI_TASK_TABLE_NAME,
-                 static_cast<unsigned long>(table_id),
-                 request_id,
-                 static_cast<unsigned long>(meta.column_id_),
-                 meta.column_name_.length(), meta.column_name_.ptr(),
-                 rowkey_predicate.length(), rowkey_predicate.ptr());
-        if (OB_FAIL(op.execute_write(sql))) {
-          LOG_WARN("failed to create the ai column task", K(ret), K(table_id),
-                   K(meta.column_id_));
+      ObString rowkey_predicate;
+      if (OB_FAIL(build_rowkey_predicate(op, ctdef, metas.at(0), row, alloc, rowkey_predicate))) {
+      } else {
+        static std::atomic<int64_t> task_seq(0);
+        int64_t seq = task_seq.fetch_add(1, std::memory_order_relaxed);
+        char request_id[64];
+        snprintf(request_id, sizeof(request_id), "%ld-%ld",
+                 ObTimeUtility::current_time(), static_cast<long>(seq));
+        for (int64_t i = 0; OB_SUCC(ret) && i < metas.count(); ++i) {
+          const AiColumnMeta &meta = metas.at(i);
+          char sql[2048];
+          snprintf(sql, sizeof(sql),
+                   "insert into %s (table_id, request_id, column_id, column_name, "
+                   "rowkey_predicate, state, retry_count, eligible_ts) "
+                   "values (%lu, '%s', %lu, '%.*s', '%.*s', 0, 0, now())",
+                   AI_TASK_TABLE_NAME,
+                   static_cast<unsigned long>(table_id),
+                   request_id,
+                   static_cast<unsigned long>(meta.column_id_),
+                   meta.column_name_.length(), meta.column_name_.ptr(),
+                   rowkey_predicate.length(), rowkey_predicate.ptr());
+          if (OB_FAIL(op.execute_write(sql))) {
+            LOG_WARN("failed to create the ai column task", K(ret), K(table_id),
+                     K(meta.column_id_));
+          }
         }
+      }
+    }
+    if (started) {
+      int end_ret = op.end_nested_session();
+      if (OB_SUCCESS != end_ret && OB_SUCC(ret)) {
+        ret = end_ret;
       }
     }
   }

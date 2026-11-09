@@ -47,7 +47,36 @@ public:
   static int do_handle(ObTableModifyOp &op,
                        const ObDMLBaseCtDef &dml_ctdef,
                        ObDMLBaseRtDef &dml_rtdef);
-  
+
+  // Builds a "`col` = value" predicate out of the given columns and row. The
+  // AI column path needs the same text the foreign key check produces.
+  static int gen_row_predicate(ObEvalCtx &eval_ctx, char *&buf, int64_t &len, int64_t &pos,
+                                const common::ObIArray<ObForeignKeyColumn> &columns,
+                                const ObExprPtrIArray &row, common::ObIAllocator &alloc,
+                                const common::ObObjPrintParams &print_params)
+  {
+    return gen_where(eval_ctx, buf, len, pos, columns, row, alloc, print_params);
+  }
+
+  // The DML ctdef keeps the row in a fixed array, so the AI column path needs
+  // its own entry point for that layout.
+  static int gen_row_predicate(ObEvalCtx &eval_ctx, char *&buf, int64_t &len, int64_t &pos,
+                                const common::ObIArray<ObForeignKeyColumn> &columns,
+                                const ExprFixedArray &row, common::ObIAllocator &alloc,
+                                const common::ObObjPrintParams &print_params)
+  {
+    int ret = OB_SUCCESS;
+    ObExprPtrIArray row_ptrs;
+    for (int64_t i = 0; OB_SUCC(ret) && i < row.count(); ++i) {
+      if (OB_FAIL(row_ptrs.push_back(row.at(i)))) {
+      }
+    }
+    if (OB_SUCC(ret)) {
+      ret = gen_where(eval_ctx, buf, len, pos, columns, row_ptrs, alloc, print_params);
+    }
+    return ret;
+  }
+
 private:
   static int value_changed(ObTableModifyOp &op,
                            const common::ObIArray<ObForeignKeyColumn> &columns,
@@ -227,6 +256,16 @@ public:
 public:
   int open_inner_conn();
   int close_inner_conn();
+  // Makes sure an inner connection is available even when the plan itself has
+  // no nested SQL. The AI column path writes its task rows through it.
+  int ensure_inner_conn()
+  {
+    int ret = OB_SUCCESS;
+    if (OB_ISNULL(inner_conn_)) {
+      ret = open_inner_conn();
+    }
+    return ret;
+  }
   int begin_nested_session(bool skip_cur_stmt_tables);
   int end_nested_session();
   int execute_write(const char *sql);

@@ -102,6 +102,13 @@ stage_deps() {
     tar xzf /mnt/workspace/deps3rd.tgz -C "${SRC_DIR}" || die "解包失败"
   fi
 
+  # 1b-1. dep_create.sh 会 rm -rf deps/3rd 后重下，只有这两个标记能让它早退。
+  # 缺了标记就会在编译阶段重下 29 个 rpm，表现为 CPU 0% 且长时间无进展。
+  local dep_md5
+  dep_md5=$(md5sum deps/init/oceanbase.el9.x86_64.deps | cut -d' ' -f1)
+  touch "deps/3rd/DONE" "deps/3rd/${dep_md5}"
+  info "已打 deps/3rd/DONE 标记"
+
   # 1c. 工具链自检
   if [ ! -x "${DEVTOOLS}/bin/clang++" ] && [ ! -x "${DEVTOOLS}/bin/clang++-17" ]; then
     info "解 rpm 依赖（apt 源 403，装不上 rpm2cpio，用 rpmfile）"
@@ -169,6 +176,7 @@ PY
   [ -e "${DEVTOOLS}/bin/clang++-17" ] || ln -s clang++ "${DEVTOOLS}/bin/clang++-17"
 
   # 1e. Rust 1.98.1
+  export PATH="$HOME/.cargo/bin:${PATH}"
   if ! command -v cargo >/dev/null 2>&1 || ! cargo --version 2>/dev/null | grep -q "1\.98\.1"; then
     info "装 Rust 1.98.1"
     export RUSTUP_DIST_SERVER=https://rsproxy.cn
@@ -176,7 +184,15 @@ PY
     curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh \
       | sh -s -- -y --default-toolchain none >/dev/null 2>&1
     [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-    rustup toolchain install 1.98.1 --profile minimal --component clippy >/dev/null 2>&1
+    export PATH="$HOME/.cargo/bin:${PATH}"
+    # rust-toolchain.toml 钉了 5 个 target（含 iOS）。少装任何一个，编译时
+    # rustup 会去补装，而 aarch64-apple-ios 的 std 组件会冲突失败。
+    rustup toolchain install 1.98.1 --profile minimal --component clippy \
+      --target x86_64-unknown-linux-gnu \
+      --target x86_64-pc-windows-gnu \
+      --target aarch64-linux-android \
+      --target aarch64-apple-ios \
+      --target aarch64-apple-ios-sim >/dev/null 2>&1
     rustup default 1.98.1 >/dev/null 2>&1
     mkdir -p "$HOME/.cargo"
     cat > "$HOME/.cargo/config.toml" <<'EOF'
@@ -196,6 +212,27 @@ EOF
   clang --version 2>/dev/null | head -1 || die "clang 缺失"
   cmake --version 2>/dev/null | head -1 || die "cmake 缺失"
   cargo --version 2>/dev/null || die "cargo 缺失"
+
+  # 1f. toolchain 已在，但 target 可能不全。少一个 iOS target，
+  # 编译时 rustup 会补装并撞上组件冲突。
+  if command -v rustup >/dev/null 2>&1; then
+    local missing_targets=""
+    for t in x86_64-unknown-linux-gnu x86_64-pc-windows-gnu \
+             aarch64-linux-android aarch64-apple-ios aarch64-apple-ios-sim; do
+      if ! rustup target list --installed --toolchain 1.98.1 2>/dev/null | grep -qx "$t"; then
+        missing_targets="${missing_targets} ${t}"
+      fi
+    done
+    if [ -n "${missing_targets}" ]; then
+      info "补装缺失的 rust target:${missing_targets}"
+      export RUSTUP_DIST_SERVER=https://rsproxy.cn
+      export RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+      # shellcheck disable=SC2086
+      rustup target add --toolchain 1.98.1 ${missing_targets} >/dev/null 2>&1 \
+        || die "rust target 补装失败：${missing_targets}"
+    fi
+    rustup default 1.98.1 >/dev/null 2>&1
+  fi
   info "✓ 依赖就绪"
 }
 
