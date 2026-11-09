@@ -344,12 +344,20 @@ run_case() {
   export OBSERVER_DIR=/tmp/sdb OBMYSQL_USR=root OBMYSQL_PWD= OBMYSQL_MS0=127.0.0.1 \
          OBMYSQL_PORT=2881 TENANT=mysql IS_BUSINESS=0
 
-  "${mt}" --host=127.0.0.1 --port=2881 --user=root --password= --database=test \
+  # 单个用例最多 240 秒，卡住就杀掉，避免整个阶段无限等待。
+  timeout 240 "${mt}" --host=127.0.0.1 --port=2881 --user=root --password= --database=test \
     --tmpdir=/tmp/mtr_var/tmp --logdir=/tmp/mtr_var/log --silent --tail-lines=30 \
     --test-file="${dir}/t/${case_name}.test" \
     --result-file="${dir}/r/mysql/${case_name}.result" \
     --timer-file=/tmp/mtr_var/log/timer > "${LOG_DIR}/${suite}_${case_name}.log" 2>&1
   local rc=$?
+  if [ ${rc} -eq 124 ]; then
+    printf '  ✗ %s/%s TIMEOUT（超过 240s，已杀掉）\n' "${suite}" "${case_name}"
+    printf '    最后执行的语句：\n'
+    grep -nE "^(create|insert|select|alter|drop|update|delete|call|commit|begin|start)" \
+      "${LOG_DIR}/${suite}_${case_name}.log" | tail -5 | sed 's/^/    /'
+    return 1
+  fi
   if [ ${rc} -eq 0 ]; then
     printf '  ✓ %s/%s PASS\n' "${suite}" "${case_name}"
   else
