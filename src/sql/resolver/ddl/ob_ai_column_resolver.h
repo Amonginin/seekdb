@@ -59,7 +59,16 @@ public:
                             common::ObString &func_name,
                             common::ObString &model_name,
                             common::ObString &expr_text,
+                            common::ObString &arg_expr_text,
                             int64_t &dim);
+
+  // Collects the ids of the columns the AI function reads. The worker evaluates
+  // the argument expression on its own, so the DML path needs the dependency
+  // list to tell a relevant update from an unrelated one.
+  static int build_dependency_ids(common::ObIAllocator &allocator,
+                                  ParseNode *ai_expr,
+                                  const share::schema::ObTableSchema &table_schema,
+                                  common::ObString &dep_column_ids);
 
   // Parses the WITH (...) option list of an AI column attribute.
   static int parse_ai_options(ParseNode *option_node,

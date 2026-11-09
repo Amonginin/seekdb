@@ -168,6 +168,7 @@ int ObAiColumnResolver::parse_ai_expr(common::ObIAllocator &allocator,
                                         common::ObString &func_name,
                                         common::ObString &model_name,
                                         common::ObString &expr_text,
+                                        common::ObString &arg_expr_text,
                                         int64_t &dim)
 {
   int ret = OB_SUCCESS;
@@ -218,6 +219,16 @@ int ObAiColumnResolver::parse_ai_expr(common::ObIAllocator &allocator,
                 }
                 if (OB_SUCC(ret)) {
                   ret = build_expr_text(allocator, ai_expr, expr_text);
+                }
+                // The argument after the model name is the value the model
+                // receives. Keep its source text so the worker can evaluate it
+                // later with an ordinary SELECT.
+                if (OB_SUCC(ret) && arg_list->num_child_ > 1) {
+                  ParseNode *value_node = arg_list->children_[1];
+                  if (OB_NOT_NULL(value_node)) {
+                    ret = build_expr_text(allocator, value_node, arg_expr_text);
+                  }
+                }
               }
             }
           }
@@ -351,6 +362,43 @@ int ObAiColumnResolver::build_normalized_expr(common::ObIAllocator &allocator,
         buf[total] = '\0';
         normalized_expr.assign_ptr(buf, total);
       }
+    }
+  }
+  return ret;
+}
+
+int ObAiColumnResolver::build_dependency_ids(common::ObIAllocator &allocator,
+                                              ParseNode *ai_expr,
+                                              const share::schema::ObTableSchema &table_schema,
+                                              common::ObString &dep_column_ids)
+{
+  int ret = OB_SUCCESS;
+  common::ObSEArray<common::ObString, 8> refs;
+  char buf[share::schema::ObAiColumnSchema::MAX_DEP_LEN];
+  int64_t pos = 0;
+  bool first = true;
+  if (OB_FAIL(collect_column_refs(allocator, ai_expr, refs))) {
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < refs.count(); ++i) {
+      const share::schema::ObColumnSchemaV2 *col = table_schema.get_column_schema(refs.at(i));
+      if (OB_ISNULL(col)) {
+        // The columns of a table being altered may not be in the schema yet.
+        continue;
+      } else {
+        const int64_t written = snprintf(buf + pos, sizeof(buf) - pos, "%s%lu",
+                                         first ? "" : ",",
+                                         static_cast<unsigned long>(col->get_column_id()));
+        if (OB_UNLIKELY(written <= 0 || pos + written >= static_cast<int64_t>(sizeof(buf)))) {
+          ret = OB_SIZE_OVERFLOW;
+          LOG_WARN("ai column dependency list is too long", K(ret), K(pos), K(written));
+        } else {
+          pos += written;
+          first = false;
+        }
+      }
+    }
+    if (OB_SUCC(ret) && pos > 0) {
+      ret = ob_write_string(allocator, common::ObString(pos, buf), dep_column_ids);
     }
   }
   return ret;
