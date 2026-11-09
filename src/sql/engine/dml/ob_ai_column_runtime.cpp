@@ -272,7 +272,7 @@ int load_ai_columns(ObTableModifyOp &op,
             } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(1), name_obj))) {
             } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(2), dep_obj))) {
             } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(3), retry_obj))) {
-            } else if (OB_UNLIKELY(!id_obj.is_integer() || !name_obj.is_string())) {
+            } else if (OB_UNLIKELY(!id_obj.is_integer_type() || !name_obj.is_string_type())) {
               ret = OB_ERR_UNEXPECTED;
               ai_trace_impl("[ai] load unexpected column types\n");
             } else {
@@ -283,10 +283,10 @@ int load_ai_columns(ObTableModifyOp &op,
               if (OB_FAIL(id_obj.get_int(id_value))) {
               } else if (OB_FAIL(name_obj.get_string(name))) {
               } else if (OB_FAIL(ob_write_string(alloc, name, meta.column_name_))) {
-              } else if (dep_obj.is_string()
+              } else if (dep_obj.is_string_type()
                          && OB_FAIL(dep_obj.get_string(dep))) {
               } else if (OB_FAIL(ob_write_string(alloc, dep, meta.dep_column_ids_))) {
-              } else if (retry_obj.is_integer() && OB_FAIL(retry_obj.get_int(retry_value))) {
+              } else if (retry_obj.is_integer_type() && OB_FAIL(retry_obj.get_int(retry_value))) {
               } else {
                 meta.column_id_ = static_cast<uint64_t>(id_value);
                 meta.max_retries_ = retry_value;

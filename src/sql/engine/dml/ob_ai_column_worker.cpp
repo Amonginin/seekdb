@@ -113,7 +113,7 @@ int load_column_meta(common::ObIAllocator &alloc,
       // not fail the task.
       ObObj arg_obj;
       if (OB_FAIL(result->get_obj(static_cast<int64_t>(0), arg_obj))) {
-      } else if (arg_obj.is_string() && OB_FAIL(arg_obj.get_string(arg_text))) {
+      } else if (arg_obj.is_string_type() && OB_FAIL(arg_obj.get_string(arg_text))) {
       } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(1), func_name))) {
       } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(2), model))) {
       } else if (OB_FAIL(result->get_int(static_cast<int64_t>(3), max_retries))) {
