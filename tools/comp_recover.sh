@@ -268,9 +268,10 @@ stage_test() {
   # mock 服务
   pkill -f ai_column_mock.py 2>/dev/null; sleep 1
   pkill -f ai_function_mock.py 2>/dev/null; sleep 1
-  cd "${SRC_DIR}/tools/deploy/mysql_test" || die "找不到 mysql_test"
-  python3 test_suite/ai_column/include/ai_column_mock.py start 19120 > "${LOG_DIR}/mock.log" 2>&1
-  python3 test_suite/ai_function/include/ai_function_mock.py start 8000 >> "${LOG_DIR}/mock.log" 2>&1
+  # 工作目录必须是 tools/deploy：测例里的 --exec 写的是 mysql_test/test_suite/...
+  cd "${SRC_DIR}/tools/deploy" || die "找不到 tools/deploy"
+  python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py start 19120 > "${LOG_DIR}/mock.log" 2>&1
+  python3 mysql_test/test_suite/ai_function/include/ai_function_mock.py start 8000 >> "${LOG_DIR}/mock.log" 2>&1
   sleep 2
   info "✓ mock 已启动（ai_column:19120, ai_function:8000）"
 
@@ -303,6 +304,21 @@ stage_test() {
     die "实例启动失败（等了 ${waited}s）"
   fi
   info "✓ 实例已就绪（耗时 ${waited}s）"
+
+  # 全新 bootstrap 的实例没有 test 库，而 mysqltest 用 --database=test 连接，
+  # 缺库会让每个用例都直接在建立连接时失败。
+  local mysql_cli="${SRC_DIR}/deps/3rd/u01/obclient/bin/mysql"
+  if [ -x "${mysql_cli}" ]; then
+    export LD_LIBRARY_PATH="${SRC_DIR}/deps/3rd/u01/obclient/lib:${LD_LIBRARY_PATH:-}"
+    if "${mysql_cli}" -h127.0.0.1 -P2881 -uroot --protocol=tcp \
+         -e "create database if not exists test;" >/dev/null 2>&1; then
+      info "✓ 已确保 test 库存在"
+    else
+      info "! 建 test 库失败，继续尝试"
+    fi
+  else
+    info "! 未找到 mysql 客户端，跳过建 test 库"
+  fi
 
   # 连不上的话再跑测例只会得到一堆无意义的 exit=1，所以在上面直接 die。
 
@@ -338,8 +354,11 @@ run_case() {
     printf '  ✓ %s/%s PASS\n' "${suite}" "${case_name}"
   else
     printf '  ✗ %s/%s FAIL (exit=%s) → %s\n' "${suite}" "${case_name}" "${rc}" "${LOG_DIR}/${suite}_${case_name}.log"
-    # 把失败点打出来，省得再去翻日志
-    grep -nE "^---|^@@|^<|^>|error |Error " "${LOG_DIR}/${suite}_${case_name}.log" | head -30
+    # mysqltest 把"连不上"这类错误写在最前面，diff 反而不一定有，所以两段都打。
+    printf '    --- log head ---\n'
+    head -15 "${LOG_DIR}/${suite}_${case_name}.log" | sed 's/^/    /'
+    printf '    --- diff ---\n'
+    grep -nE "^---|^@@|^<|^>|^[0-9]+:" "${LOG_DIR}/${suite}_${case_name}.log" | head -20 | sed 's/^/    /'
   fi
   return ${rc}
 }
