@@ -1057,7 +1057,6 @@ int ObTableModifyOp::submit_all_dml_task()
                 OB_FAIL(dml_rtctx_.das_ref_.pick_del_task_to_first())) {
     } else if (OB_FAIL(dml_rtctx_.das_ref_.execute_all_task())) {
     } else if (OB_FAIL(dml_rtctx_.das_ref_.close_all_task())) {
-    } else if (OB_FAIL(schedule_ai_columns_for_rows())) {
     } else if (OB_FAIL(ObDMLService::handle_after_row_processing(this, &get_dml_modify_row_list()))) {
     } else {
       dml_modify_rows_.clear();
