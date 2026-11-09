@@ -9916,7 +9916,7 @@ static struct VarsInit{
       ObSysVars[719].info_ = "Enable reading a local file as a table through read_csv, read_json, read_ndjson and read_parquet." ;
       ObSysVars[719].name_ = "enable_file_sql" ;
       ObSysVars[719].data_type_ = ObIntType ;
-      ObSysVars[719].flags_ = ObSysVarFlag::SESSION_SCOPE | ObSysVarFlag::GLOBAL_SCOPE | ObSysVarFlag::NEED_SERIALIZE ;
+      ObSysVars[719].flags_ = ObSysVarFlag::GLOBAL_SCOPE | ObSysVarFlag::SESSION_SCOPE | ObSysVarFlag::NEED_SERIALIZE ;
       ObSysVars[719].id_ = SYS_VAR_ENABLE_FILE_SQL ;
       cur_max_var_id = MAX(cur_max_var_id, static_cast<int64_t>(SYS_VAR_ENABLE_FILE_SQL)) ;
       ObSysVarsIdToArrayIdx[SYS_VAR_ENABLE_FILE_SQL] = 719 ;
@@ -9930,7 +9930,7 @@ static struct VarsInit{
   }
 }vars_init;
 
-static int64_t var_amount = 719;
+static int64_t var_amount = 720;
 
 int64_t ObSysVariables::get_all_sys_var_count(){ return ObSysVarMeta::ALL_SYS_VARS_COUNT;}
 ObSysVarClassType ObSysVariables::get_sys_var_id(int64_t i){ return ObSysVars[i].id_;}

@@ -9713,9 +9713,9 @@
     "base_value": "1",
     "data_type": "bool",
     "info": "wether use parameter anonymous_block",
-    "flags": "SESSION | GLOBAL | NEED_SERIALIZE",
+    "flags": "GLOBAL | SESSION | NEED_SERIALIZE",
     "publish_version": "",
-    "info_cn": "",
+    "info_cn": "开启后可通过 read_csv 等表函数直接查询本地文件",
     "background_cn": "",
     "ref_url": ""
   },
@@ -10927,9 +10927,9 @@
     "base_value": "1",
     "data_type": "bool",
     "info": "wether use parameter anonymous_block in ps mode",
-    "flags": "SESSION | GLOBAL | NEED_SERIALIZE",
+    "flags": "GLOBAL | SESSION | NEED_SERIALIZE",
     "publish_version": "",
-    "info_cn": "",
+    "info_cn": "开启后可通过 read_csv 等表函数直接查询本地文件",
     "background_cn": "",
     "ref_url": ""
   },
@@ -10983,9 +10983,9 @@
     "base_value": "0",
     "data_type": "bool",
     "info": "Enable reading a local file as a table through read_csv, read_json, read_ndjson and read_parquet.",
-    "flags": "SESSION | GLOBAL | NEED_SERIALIZE",
+    "flags": "GLOBAL | SESSION | NEED_SERIALIZE",
     "publish_version": "",
-    "info_cn": "",
+    "info_cn": "开启后可通过 read_csv 等表函数直接查询本地文件",
     "background_cn": "",
     "ref_url": ""
   }
