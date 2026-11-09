@@ -213,18 +213,32 @@ int load_ai_columns(ObTableModifyOp &op,
 {
   int ret = OB_SUCCESS;
   char sql[4096];
-  int64_t pos = 0;
-  if (OB_FAIL(databuff_printf(sql, static_cast<int64_t>(sizeof(sql)), pos,
-                              "select column_id, column_name, dep_column_ids, max_retries "
-                              "from oceanbase.__all_ai_column where table_id in ("))) {
+  int64_t pos = snprintf(sql, sizeof(sql),
+                         "select column_id, column_name, dep_column_ids, max_retries "
+                         "from oceanbase.__all_ai_column where table_id in (");
+  if (OB_UNLIKELY(pos <= 0 || pos >= static_cast<int64_t>(sizeof(sql)))) {
+    ret = OB_SIZE_OVERFLOW;
+    ai_trace_impl("[ai] load build sql failed pos=%ld\n", static_cast<long>(pos));
   } else {
     for (int64_t i = 0; OB_SUCC(ret) && i < table_ids.count(); ++i) {
-      if (OB_FAIL(databuff_printf(sql, static_cast<int64_t>(sizeof(sql)), pos, "%s%lu",
-                                  i == 0 ? "" : ",",
-                                  static_cast<unsigned long>(table_ids.at(i))))) {
+      const int64_t written = snprintf(sql + pos, sizeof(sql) - pos, "%s%lu",
+                                       i == 0 ? "" : ",",
+                                       static_cast<unsigned long>(table_ids.at(i)));
+      if (OB_UNLIKELY(written <= 0 || pos + written >= static_cast<int64_t>(sizeof(sql)))) {
+        ret = OB_SIZE_OVERFLOW;
+        ai_trace_impl("[ai] load build table list failed pos=%ld\n", static_cast<long>(pos));
+      } else {
+        pos += written;
       }
     }
-    if (OB_SUCC(ret) && OB_FAIL(databuff_printf(sql, static_cast<int64_t>(sizeof(sql)), pos, ")"))) {
+    if (OB_SUCC(ret)) {
+      const int64_t written = snprintf(sql + pos, sizeof(sql) - pos, ")");
+      if (OB_UNLIKELY(written <= 0 || pos + written >= static_cast<int64_t>(sizeof(sql)))) {
+        ret = OB_SIZE_OVERFLOW;
+        ai_trace_impl("[ai] load build tail failed pos=%ld\n", static_cast<long>(pos));
+      } else {
+        pos += written;
+      }
     }
   }
   if (OB_FAIL(ret)) {
