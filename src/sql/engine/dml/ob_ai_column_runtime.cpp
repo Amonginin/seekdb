@@ -119,15 +119,17 @@ int load_ai_columns(ObTableModifyOp &op,
         ObString pk_column_ids;
         ObString pk_column_names;
         ObString sync_mode;
-        if (OB_FAIL(result->get_uint(0, meta.column_id_))) {
-        } else if (OB_FAIL(result->get_varchar(1, column_name))) {
-        } else if (OB_FAIL(result->get_varchar(2, pk_column_ids))) {
-        } else if (OB_FAIL(result->get_varchar(3, pk_column_names))) {
-        } else if (OB_FAIL(result->get_varchar(4, sync_mode))) {
-        } else if (OB_FAIL(result->get_int(5, meta.max_retries_))) {
-        } else if (OB_FAIL(result->get_int(6, meta.result_type_))) {
-        } else if (OB_FAIL(result->get_uint(7, meta.state_column_id_))) {
-        } else if (OB_FAIL(result->get_uint(8, meta.request_column_id_))) {
+        // The column index has to be typed: the result also offers overloads
+        // that take a column name, and a literal zero fits both.
+        if (OB_FAIL(result->get_uint(static_cast<int64_t>(0), meta.column_id_))) {
+        } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(1), column_name))) {
+        } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(2), pk_column_ids))) {
+        } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(3), pk_column_names))) {
+        } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(4), sync_mode))) {
+        } else if (OB_FAIL(result->get_int(static_cast<int64_t>(5), meta.max_retries_))) {
+        } else if (OB_FAIL(result->get_int(static_cast<int64_t>(6), meta.result_type_))) {
+        } else if (OB_FAIL(result->get_uint(static_cast<int64_t>(7), meta.state_column_id_))) {
+        } else if (OB_FAIL(result->get_uint(static_cast<int64_t>(8), meta.request_column_id_))) {
         } else if (OB_FAIL(ob_write_string(alloc, column_name, meta.column_name_))) {
         } else if (OB_FAIL(ob_write_string(alloc, pk_column_ids, meta.pk_column_ids_))) {
         } else if (OB_FAIL(ob_write_string(alloc, pk_column_names, meta.pk_column_names_))) {
