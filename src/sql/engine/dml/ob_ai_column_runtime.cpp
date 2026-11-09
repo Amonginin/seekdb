@@ -3,7 +3,10 @@
 #include "sql/engine/dml/ob_ai_column_runtime.h"
 
 #include <atomic>
+#include <fcntl.h>
+#include <stdarg.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #include "lib/ob_define.h"
 #include "lib/time/ob_time_utility.h"
@@ -28,6 +31,25 @@ static const char *AI_TASK_TABLE_NAME = "oceanbase.__all_ai_column_task";
 // The three hidden columns that back an AI column are named with this prefix,
 // so the schema alone tells whether a table has one.
 static const char *AI_HIDDEN_PREFIX = "__ai_";
+
+// seekdb drops LOG_WARN and LOG_INFO for this module and redirects stderr, so
+// the only channel that always lands is a direct write to a fixed file.
+static void ai_trace(const char *fmt, ...)
+{
+  int fd = ::open("/tmp/aidbg.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+  if (fd >= 0) {
+    char buf[512];
+    va_list args;
+    va_start(args, fmt);
+    const int len = vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    if (len > 0) {
+      const ssize_t ignored = ::write(fd, buf, static_cast<size_t>(len < static_cast<int>(sizeof(buf)) ? len : static_cast<int>(sizeof(buf))));
+      UNUSED(ignored);
+    }
+    ::close(fd);
+  }
+}
 
 // One row of oceanbase.__all_ai_column, in the shape the DML path needs.
 struct AiColumnMeta
@@ -305,6 +327,8 @@ int ObAiColumnRuntime::schedule_row(ObTableModifyOp &op,
   const ObDmlEventType event = static_cast<ObDmlEventType>(dml_event);
   const ExprFixedArray *row = NULL;
   bool need_schedule = false;
+  ai_trace("[ai] schedule_row table_id=%lu event=%ld\n",
+           static_cast<unsigned long>(table_id), static_cast<long>(dml_event));
   if (is_inner_table(table_id)) {
     // AI columns only exist on user tables, and bootstrap inserts into the
     // system tables before __all_ai_column is created.
@@ -326,9 +350,13 @@ int ObAiColumnRuntime::schedule_row(ObTableModifyOp &op,
     } else if (OB_FAIL(op.begin_nested_session(false))) {
     } else if (FALSE_IT(started = true)) {
     } else if (OB_FAIL(load_ai_columns(op, table_id, alloc, metas))) {
+      ai_trace("[ai] load_meta failed table_id=%lu ret=%d\n",
+               static_cast<unsigned long>(table_id), ret);
     } else if (metas.empty()) {
-      LOG_INFO("no ai column metadata row", K(table_id));
+      ai_trace("[ai] load_meta empty table_id=%lu\n", static_cast<unsigned long>(table_id));
     } else {
+      ai_trace("[ai] load_meta table_id=%lu count=%ld\n",
+               static_cast<unsigned long>(table_id), metas.count());
       ObString rowkey_predicate;
       static std::atomic<int64_t> task_seq(0);
       const int64_t seq = task_seq.fetch_add(1, std::memory_order_relaxed);
@@ -358,11 +386,14 @@ int ObAiColumnRuntime::schedule_row(ObTableModifyOp &op,
                  meta.column_name_.length(), meta.column_name_.ptr(),
                  rowkey_predicate.length(), rowkey_predicate.ptr());
         if (OB_FAIL(op.execute_write(sql))) {
-          LOG_WARN("failed to create the ai column task", K(ret), K(table_id),
-                   K(meta.column_id_));
+          ai_trace("[ai] write failed table_id=%lu column_id=%lu ret=%d\n",
+                   static_cast<unsigned long>(table_id),
+                   static_cast<unsigned long>(meta.column_id_), ret);
         } else {
-          LOG_INFO("ai column task created", K(table_id), K(meta.column_id_),
-                   K(rowkey_predicate), KCSTRING(request_id));
+          ai_trace("[ai] task written table_id=%lu column_id=%lu pred=%.*s\n",
+                   static_cast<unsigned long>(table_id),
+                   static_cast<unsigned long>(meta.column_id_),
+                   rowkey_predicate.length(), rowkey_predicate.ptr());
         }
       }
     }
