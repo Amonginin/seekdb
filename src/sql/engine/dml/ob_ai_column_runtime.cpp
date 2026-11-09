@@ -12,6 +12,7 @@
 #include "lib/time/ob_time_utility.h"
 #include "lib/utility/ob_print_utils.h"
 #include "share/ob_errno.h"
+#include "share/ob_server_struct.h"
 #include "share/schema/ob_schema_getter_guard.h"
 #include "share/schema/ob_schema_struct.h"
 #include "share/schema/ob_table_schema.h"
@@ -244,22 +245,23 @@ int load_ai_columns(ObTableModifyOp &op,
     }
   }
   if (OB_FAIL(ret)) {
-  } else if (OB_FAIL(op.open_inner_conn())) {
-    ai_trace_impl("[ai] load open_inner_conn ret=%d\n", ret);
+  } else if (OB_ISNULL(GCTX.sql_proxy_)) {
+    ret = OB_NOT_INIT;
   } else {
     SMART_VAR(common::ObMySQLProxy::MySQLResult, res) {
       sqlclient::ObMySQLResult *result = NULL;
-      bool started = false;
       sql[pos] = '\0';
-      if (OB_FAIL(op.begin_nested_session(false))) {
-        ai_trace_impl("[ai] load begin_nested ret=%d\n", ret);
+      // The metadata is stable between statements, so it is read through the
+      // server proxy instead of the connection of the running session: only
+      // the write of the task rows has to share the transaction, and reusing
+      // the session connection for the read left it in a state that rejected
+      // the following writes.
+      if (OB_FAIL(GCTX.sql_proxy_->read(res, sql))) {
+        ai_trace_impl("[ai] load read ret=%d sql=%s\n", ret, sql);
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
       } else {
-        started = true;
-        if (OB_FAIL(op.execute_read(sql, res))) {
-          ai_trace_impl("[ai] load execute_read ret=%d sql=%s\n", ret, sql);
-        } else if (OB_ISNULL(result = res.get_result())) {
-          ret = OB_ERR_UNEXPECTED;
-        } else {
+        {
           while (OB_SUCC(ret) && OB_SUCC(result->next())) {
             AiColumnMeta meta;
             ObObj id_obj;
@@ -308,15 +310,6 @@ int load_ai_columns(ObTableModifyOp &op,
             ai_trace_impl("[ai] load result close ret=%d\n", close_ret);
             if (OB_SUCC(ret)) {
               ret = close_ret;
-            }
-          }
-        }
-        if (started) {
-          int end_ret = op.end_nested_session();
-          if (OB_SUCCESS != end_ret) {
-            ai_trace_impl("[ai] load end_nested ret=%d\n", end_ret);
-            if (OB_SUCC(ret)) {
-              ret = end_ret;
             }
           }
         }
