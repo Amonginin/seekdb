@@ -278,8 +278,25 @@ stage_test() {
   # 起库
   # 上一轮的服务进程必须先停掉：下面会删掉它正在用的数据目录，
   # 留着它还会占住 2881，新实例绑不上端口，测试就会在握手阶段断连。
-  pkill -f "seekdb --base-dir" 2>/dev/null
-  sleep 3
+  pkill -9 -f "observer/seekdb" 2>/dev/null
+  pkill -9 -f "seekdb --base-dir" 2>/dev/null
+  sleep 2
+  # 等到端口真正空出来。占用的进程可能不是上面两个模式匹配到的，
+  # 所以这里以端口状态为准，并把占用者打出来。
+  local port_wait=0
+  while [ ${port_wait} -lt 15 ]; do
+    if ! (exec 3<>/dev/tcp/127.0.0.1/2881) 2>/dev/null; then
+      break
+    fi
+    sleep 1
+    port_wait=$((port_wait + 1))
+  done
+  if (exec 3<>/dev/tcp/127.0.0.1/2881) 2>/dev/null; then
+    info "端口 2881 仍被占用，占用者："
+    ss -lntp 2>/dev/null | grep 2881
+    ps -ef | grep -i seekdb | grep -v grep
+    die "端口 2881 被占用，无法启动实例"
+  fi
   rm -rf /tmp/sdb && mkdir -p /tmp/sdb
   local bin="${SRC_DIR}/build_release/src/observer/seekdb"
   if [ ! -x "${bin}" ]; then
