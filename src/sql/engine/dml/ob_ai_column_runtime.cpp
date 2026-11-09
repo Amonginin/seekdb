@@ -333,10 +333,11 @@ int write_task_rows(ObTableModifyOp &op,
                     const ObIArray<AiColumnMeta> &metas)
 {
   int ret = OB_SUCCESS;
+  // The connection shares the session of the statement, so the task rows join
+  // its transaction without a nested session. Saving and restoring the session
+  // around every write made the following writes fail with an internal error.
   if (OB_FAIL(op.open_inner_conn())) {
     ai_trace_impl("[ai] write open_inner_conn ret=%d\n", ret);
-  } else if (OB_FAIL(op.begin_nested_session(false))) {
-    ai_trace_impl("[ai] write begin_nested ret=%d\n", ret);
   } else {
     static std::atomic<int64_t> task_seq(0);
     const int64_t seq = task_seq.fetch_add(1, std::memory_order_relaxed);
@@ -443,10 +444,6 @@ int write_task_rows(ObTableModifyOp &op,
                       static_cast<unsigned long>(row.table_id_),
                       row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr());
       }
-    }
-    int end_ret = op.end_nested_session();
-    if (OB_SUCCESS != end_ret && OB_SUCC(ret)) {
-      ret = end_ret;
     }
   }
   return ret;
