@@ -1075,16 +1075,15 @@ int ObTableModifyOp::schedule_ai_columns_for_rows()
   int ret = OB_SUCCESS;
   ObDMLModifyRowsList &rows = get_dml_modify_row_list();
   ObDMLModifyRowsList::iterator it = rows.begin();
-  for (; OB_SUCC(ret) && it != rows.end(); ++it) {
+  for (; it != rows.end(); ++it) {
     ObDMLModifyRowNode &row = *it;
     if (OB_ISNULL(row.dml_ctdef_)) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("the modify row carries no ctdef", K(ret));
+      ObAiColumnRuntime::trace("[ai] modify row without ctdef\n");
     } else {
       int ai_ret = ObAiColumnRuntime::schedule_row(*this, *row.dml_ctdef_,
                                                   static_cast<int64_t>(row.dml_event_));
       if (OB_FAIL(ai_ret)) {
-        // A failure here must not fail the statement the user issued.
+        // A failure here must never fail the statement the user issued.
         ObAiColumnRuntime::trace("[ai] schedule failed ret=%d\n", ai_ret);
       }
     }

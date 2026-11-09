@@ -347,9 +347,11 @@ int ObAiColumnRuntime::schedule_row(ObTableModifyOp &op,
   bool need_schedule = false;
   ai_trace("[ai] schedule_row table_id=%lu event=%ld\n",
            static_cast<unsigned long>(table_id), static_cast<long>(dml_event));
-  if (is_inner_table(table_id)) {
+  if (is_sys_table(table_id)) {
     // AI columns only exist on user tables, and bootstrap inserts into the
-    // system tables before __all_ai_column is created.
+    // system tables before __all_ai_column is created. Only the system range is
+    // skipped: is_inner_table would also cover a user table, whose id in this
+    // build is well below the inner table limit.
   } else if (FALSE_IT(need_schedule = true)) {
     // The metadata query below is the only reliable source: the table schema
     // returned by id does not necessarily carry the hidden columns that back
