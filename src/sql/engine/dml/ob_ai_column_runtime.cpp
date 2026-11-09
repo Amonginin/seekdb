@@ -246,9 +246,13 @@ int dependency_changed(ObTableModifyOp &op,
         } else if (OB_FAIL(ctdef.new_row_.at(idx)->eval(op.get_eval_ctx(), new_datum))) {
         } else if (OB_ISNULL(old_datum) || OB_ISNULL(new_datum)) {
           ret = OB_ERR_UNEXPECTED;
-        } else if (0 != old_datum->compare(*new_datum,
-                                           ctdef.old_row_.at(idx)->datum_meta_,
-                                           ctdef.new_row_.at(idx)->datum_meta_)) {
+        } else if (old_datum->is_null() != new_datum->is_null()) {
+          changed = true;
+        } else if (!old_datum->is_null()
+                   && (old_datum->len_ != new_datum->len_
+                       || 0 != MEMCMP(old_datum->ptr_, new_datum->ptr_, old_datum->len_))) {
+          // Both sides carry the same column type, so the encoded bytes compare
+          // directly and no collation is involved.
           changed = true;
         }
       }
@@ -283,8 +287,7 @@ int ObAiColumnRuntime::has_ai_column(ObTableModifyOp &op,
       } else if (column->is_hidden()) {
         const ObString name = column->get_column_name_str();
         if (name.length() > static_cast<int32_t>(STRLEN(AI_HIDDEN_PREFIX))
-            && 0 == name.compare(ObString::make_string(AI_HIDDEN_PREFIX),
-                                 static_cast<int32_t>(STRLEN(AI_HIDDEN_PREFIX)))) {
+            && name.prefix_match(AI_HIDDEN_PREFIX)) {
           has_ai_column = true;
         }
       }
