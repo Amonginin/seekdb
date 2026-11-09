@@ -248,8 +248,10 @@ stage_build() {
 
   pkill -f "seekdb --base-dir" 2>/dev/null; sleep 2
 
-  ./build.sh release --make -j8 > "${LOG_DIR}/build.log" 2>&1
-  local rc=$?
+  # tee：屏幕上直接看进度，同时留一份日志备查。
+  # 退出码取 PIPESTATUS[0]，$? 会拿到 tee 的返回值。
+  ./build.sh release --make -j8 2>&1 | tee "${LOG_DIR}/build.log"
+  local rc=${PIPESTATUS[0]}
   echo "build exit=${rc}"
   if [ ${rc} -ne 0 ]; then
     grep -nE "error:|fatal error|Error " "${LOG_DIR}/build.log" | head -20
@@ -320,6 +322,8 @@ run_case() {
     printf '  ✓ %s/%s PASS\n' "${suite}" "${case_name}"
   else
     printf '  ✗ %s/%s FAIL (exit=%s) → %s\n' "${suite}" "${case_name}" "${rc}" "${LOG_DIR}/${suite}_${case_name}.log"
+    # 把失败点打出来，省得再去翻日志
+    grep -nE "^---|^@@|^<|^>|error |Error " "${LOG_DIR}/${suite}_${case_name}.log" | head -30
   fi
   return ${rc}
 }
@@ -329,5 +333,6 @@ case "${STAGE}" in
   deps)  stage_deps ;;
   build) stage_build ;;
   test)  stage_test ;;
-  *)     echo "用法: bash $0 {check|deps|build|test}"; exit 1 ;;
+  all)   stage_deps; stage_build; stage_test ;;
+  *)     echo "用法: bash $0 {check|deps|build|test|all}"; exit 1 ;;
 esac
