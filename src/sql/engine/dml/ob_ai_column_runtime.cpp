@@ -229,15 +229,18 @@ int load_ai_columns(ObTableModifyOp &op,
   }
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(op.open_inner_conn())) {
+    ai_trace_impl("[ai] load open_inner_conn ret=%d\n", ret);
   } else {
     SMART_VAR(common::ObMySQLProxy::MySQLResult, res) {
       sqlclient::ObMySQLResult *result = NULL;
       bool started = false;
       sql[pos] = '\0';
       if (OB_FAIL(op.begin_nested_session(false))) {
+        ai_trace_impl("[ai] load begin_nested ret=%d\n", ret);
       } else {
         started = true;
         if (OB_FAIL(op.execute_read(sql, res))) {
+          ai_trace_impl("[ai] load execute_read ret=%d sql=%s\n", ret, sql);
         } else if (OB_ISNULL(result = res.get_result())) {
           ret = OB_ERR_UNEXPECTED;
         } else {
@@ -285,7 +288,9 @@ int write_task_rows(ObTableModifyOp &op,
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(op.open_inner_conn())) {
+    ai_trace_impl("[ai] write open_inner_conn ret=%d\n", ret);
   } else if (OB_FAIL(op.begin_nested_session(false))) {
+    ai_trace_impl("[ai] write begin_nested ret=%d\n", ret);
   } else {
     static std::atomic<int64_t> task_seq(0);
     const int64_t seq = task_seq.fetch_add(1, std::memory_order_relaxed);
@@ -369,8 +374,7 @@ int write_task_rows(ObTableModifyOp &op,
         }
         if (OB_FAIL(ret)) {
         } else if (OB_FAIL(op.execute_write(action))) {
-          ai_trace_impl("[ai] flush write failed table_id=%lu ret=%d\n",
-                        static_cast<unsigned long>(row.table_id_), ret);
+          ai_trace_impl("[ai] flush write failed ret=%d sql=%s\n", ret, action);
         } else if (ObDmlEventType::DE_DELETING != event) {
           // Mark the row with the request that is now responsible for it. The
           // worker only publishes a result when the marker still matches, so a
@@ -384,8 +388,7 @@ int write_task_rows(ObTableModifyOp &op,
                    request_id,
                    row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr());
           if (OB_FAIL(op.execute_write(req_sql))) {
-            ai_trace_impl("[ai] mark request failed table_id=%lu ret=%d\n",
-                          static_cast<unsigned long>(row.table_id_), ret);
+            ai_trace_impl("[ai] mark request failed ret=%d sql=%s\n", ret, req_sql);
           }
         }
       }
@@ -484,10 +487,13 @@ int ObAiColumnRuntime::flush_pending(ObTableModifyOp &op,
     ObSEArray<AiColumnMeta, 8> metas;
     if (OB_FAIL(ret)) {
     } else if (OB_FAIL(load_ai_columns(op, table_ids, alloc, metas))) {
+      ai_trace_impl("[ai] flush load stage ret=%d tables=%ld\n", ret, table_ids.count());
     } else if (metas.empty()) {
       // None of the touched tables has an AI column.
     } else if (FALSE_IT(has_work = true)) {
     } else if (OB_FAIL(write_task_rows(op, pending, metas))) {
+      ai_trace_impl("[ai] flush write stage ret=%d pending=%ld metas=%ld\n",
+                    ret, pending.count(), metas.count());
     }
     if (OB_FAIL(ret)) {
       // The AI column must never break the statement the user issued.
