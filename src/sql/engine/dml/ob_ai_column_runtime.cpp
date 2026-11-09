@@ -297,20 +297,34 @@ int load_ai_columns(ObTableModifyOp &op,
           }
           if (OB_ITER_END == ret) {
             ret = OB_SUCCESS;
+          } else if (OB_FAIL(ret)) {
+            ai_trace_impl("[ai] load row loop ret=%d metas=%ld\n", ret, metas.count());
           }
         }
         int close_ret = OB_SUCCESS;
         if (OB_NOT_NULL(result)) {
           close_ret = result->close();
-          if (OB_SUCCESS != close_ret && OB_SUCC(ret)) {
-            ret = close_ret;
+          if (OB_SUCCESS != close_ret) {
+            ai_trace_impl("[ai] load result close ret=%d\n", close_ret);
+            if (OB_SUCC(ret)) {
+              ret = close_ret;
+            }
           }
         }
         if (started) {
           int end_ret = op.end_nested_session();
-          if (OB_SUCCESS != end_ret && OB_SUCC(ret)) {
-            ret = end_ret;
+          if (OB_SUCCESS != end_ret) {
+            ai_trace_impl("[ai] load end_nested ret=%d\n", end_ret);
+            if (OB_SUCC(ret)) {
+              ret = end_ret;
+            }
           }
+        }
+        if (OB_FAIL(ret) && metas.count() > 0) {
+          // The rows are already copied out, so a failure while closing the
+          // cursor must not throw away usable metadata.
+          ai_trace_impl("[ai] load keeps %ld rows despite ret=%d\n", metas.count(), ret);
+          ret = OB_SUCCESS;
         }
       }
     }
