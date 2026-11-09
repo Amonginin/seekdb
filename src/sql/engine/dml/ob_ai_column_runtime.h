@@ -2,7 +2,7 @@
 
 #include "lib/container/ob_se_array.h"
 #include "lib/string/ob_string.h"
-#include "query/api/query/engine/expr/ob_expr.h"
+#include "share/ob_define.h"
 
 namespace oceanbase
 {
@@ -13,37 +13,54 @@ class ObIAllocator;
 namespace sql
 {
 
-class ObExpr;
 class ObTableModifyOp;
 struct ObDMLBaseCtDef;
 
-// DML side of the AI column pipeline.
+// One row that needs its AI columns recomputed. Only the identifying
+// information is kept: table, kind of change, the rowkey predicate and the
+// columns that really changed. Nothing here executes SQL.
+class ObAiPendingRow
+{
+public:
+  ObAiPendingRow()
+    : table_id_(common::OB_INVALID_ID),
+      dml_event_(0)
+  {}
+  TO_STRING_KV(K_(table_id), K_(dml_event), K_(rowkey_predicate),
+               K_(old_rowkey_predicate), K_(changed_column_ids));
+  uint64_t table_id_;
+  int64_t dml_event_;
+  common::ObString rowkey_predicate_;
+  // Only set for an update: the predicate before the change, so a task of the
+  // old row can be dropped when the primary key moved.
+  common::ObString old_rowkey_predicate_;
+  common::ObString changed_column_ids_;
+};
+typedef common::ObSEArray<ObAiPendingRow, 8> ObAiPendingRowArray;
+
+// DML side of the AI column pipeline, in two phases.
 //
-// The work runs from ObDMLService::handle_after_processing_single_row, not
-// from the insert loop: by then the DAS buffer of the statement has been
-// written, and that is the same point the foreign key checks use a nested
-// session from. Doing it earlier corrupted the row being written.
+// Phase one runs while the rows are produced and only records the row keys,
+// which keeps the DML statement free of any nested execution.
+//
+// Phase two runs once the statement has finished writing its own rows and
+// still shares its transaction: the task rows of
+// oceanbase.__all_ai_column_task are written there. Because the write uses the
+// connection of the running session, the task rows are visible before COMMIT
+// and disappear on ROLLBACK.
 class ObAiColumnRuntime
 {
 public:
-  // A row that is inserted, or whose dependency columns changed, gets one task
-  // row per AI column in oceanbase.__all_ai_column_task. The row is written in
-  // a nested session, so it belongs to the transaction of the statement: it is
-  // visible before COMMIT and disappears on ROLLBACK.
-  static int schedule_row(ObTableModifyOp &op,
-                          const ObDMLBaseCtDef &ctdef,
-                          const int64_t dml_event);
+  static int record_row(ObTableModifyOp &op,
+                        const ObDMLBaseCtDef &ctdef,
+                        const int64_t dml_event,
+                        common::ObIAllocator &alloc,
+                        ObAiPendingRowArray &pending);
 
-  // True when the table has the hidden columns that back an AI column. The
-  // check reads the schema, not the metadata table, so it stays cheap enough
-  // to run for every modified row.
-  static int has_ai_column(ObTableModifyOp &op,
-                           const uint64_t table_id,
-                           bool &has_ai_column);
-
-  // Writes one line to /tmp/aidbg.log. The build drops the log lines this
-  // module produces, so a direct write is the only channel that lands.
-  static void trace(const char *fmt, ...);
+  static int flush_pending(ObTableModifyOp &op,
+                           const ObAiPendingRowArray &pending,
+                           common::ObIAllocator &alloc,
+                           bool &has_work);
 };
 
 } // namespace sql

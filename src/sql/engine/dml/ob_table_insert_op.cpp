@@ -227,12 +227,14 @@ OB_INLINE int ObTableInsertOp::insert_row_to_das()
                                                                 tablet_loc->tablet_id_,
                                                                 eval_ctx_))) {
       } else if (OB_FAIL(ObDMLService::insert_row(ins_ctdef, ins_rtdef, tablet_loc, dml_rtctx_, modify_row.new_row_))) {
-      } else if (ins_ctdef.is_primary_index_ && OB_FAIL(dml_modify_rows_.push_back(modify_row))) {
-        // The AI column task rows are written from the after-row phase. Push
-        // unconditionally here so that phase can see the row; it decides from
-        // the schema whether there is anything to do.
+      } else if (need_after_row_process(ins_ctdef) && OB_FAIL(dml_modify_rows_.push_back(modify_row))) {
       } else if (ins_ctdef.is_primary_index_) {
-        ObAiColumnRuntime::trace("[ai] row queued\n");
+        // Record the row so its AI columns are recomputed once the statement
+        // has written everything it has to write.
+        if (OB_FAIL(ObAiColumnRuntime::record_row(*this, ins_ctdef,
+                                                  static_cast<int64_t>(ObDmlEventType::DE_INSERTING),
+                                                  ctx_.get_allocator(), ai_pending_rows_))) {
+        }
       }
       if (OB_FAIL(ret)) {
         record_err_for_load_data(ret, ins_rtdef.cur_row_num_);

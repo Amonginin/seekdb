@@ -19,6 +19,7 @@
 
 #include "sql/engine/ob_operator.h"
 #include "sql/engine/dml/ob_dml_ctx_define.h"
+#include "sql/engine/dml/ob_ai_column_runtime.h"
 #include "sql/session/ob_inner_sql_connection.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/dml/ob_fk_checker.h"
@@ -266,6 +267,10 @@ public:
     }
     return ret;
   }
+
+  // Rows whose AI columns have to be recomputed. They are recorded while the
+  // statement runs and the task rows are written once it has finished.
+  ObAiPendingRowArray &get_ai_pending_rows() { return ai_pending_rows_; }
   int begin_nested_session(bool skip_cur_stmt_tables);
   int end_nested_session();
   int execute_write(const char *sql);
@@ -353,6 +358,7 @@ public:
   bool execute_single_row_;
   ObSEArray<ObExpr *, 4> trigger_clear_exprs_;
   ObDMLModifyRowsList dml_modify_rows_;
+  ObAiPendingRowArray ai_pending_rows_;
   ObSEArray<ObForeignKeyChecker *, 4> fk_checkers_;
   ObChunkDatumStore::ShadowStoredRow last_store_row_;
 private:

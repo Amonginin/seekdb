@@ -623,6 +623,7 @@ ObTableModifyOp::ObTableModifyOp(ObExecContext &ctx,
     dml_rtctx_(eval_ctx_, ctx, *this),
     execute_single_row_(false),
     dml_modify_rows_(ctx.get_allocator()),
+    ai_pending_rows_(ctx.get_allocator()),
     last_store_row_(),
     saved_session_(NULL)
 {
@@ -804,6 +805,9 @@ int ObTableModifyOp::inner_close()
       auto_service.release_handle(autoinc_params.at(i).cache_handle_);
     }
   }
+  // Write the AI column task rows while the transaction of the statement is
+  // still open, then release the connection it used.
+  OX(schedule_ai_columns_for_rows());
   close_inner_conn();
   if (dml_rtctx_.das_ref_.has_task()) {
     if (OB_FAIL(dml_rtctx_.das_ref_.close_all_task())) {
@@ -1072,21 +1076,15 @@ int ObTableModifyOp::submit_all_dml_task()
 int ObTableModifyOp::schedule_ai_columns_for_rows()
 {
   int ret = OB_SUCCESS;
-  ObDMLModifyRowsList &rows = get_dml_modify_row_list();
-  ObDMLModifyRowsList::iterator it = rows.begin();
-  for (; it != rows.end(); ++it) {
-    ObDMLModifyRowNode &row = *it;
-    if (OB_ISNULL(row.dml_ctdef_)) {
-      ObAiColumnRuntime::trace("[ai] modify row without ctdef\n");
-    } else {
-      int ai_ret = ObAiColumnRuntime::schedule_row(*this, *row.dml_ctdef_,
-                                                  static_cast<int64_t>(row.dml_event_));
-      if (OB_FAIL(ai_ret)) {
-        // A failure here must never fail the statement the user issued.
-        ObAiColumnRuntime::trace("[ai] schedule failed ret=%d\n", ai_ret);
-      }
-    }
+  // The statement has finished writing its own rows, and its transaction is
+  // still open, so this is the only place where the task rows can join it
+  // without disturbing a write that is still in flight.
+  bool has_work = false;
+  if (ai_pending_rows_.empty()) {
+  } else if (OB_FAIL(ObAiColumnRuntime::flush_pending(*this, ai_pending_rows_,
+                                                      ctx_.get_allocator(), has_work))) {
   }
+  ai_pending_rows_.reset();
   return ret;
 }
 

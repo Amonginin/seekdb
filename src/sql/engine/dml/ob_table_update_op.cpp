@@ -333,6 +333,10 @@ OB_INLINE int ObTableUpdateOp::update_row_to_das()
       } else if (OB_FAIL(ObDMLService::update_row(upd_ctdef, upd_rtdef, old_tablet_loc, new_tablet_loc, dml_rtctx_,
                                                  modify_row.old_row_, modify_row.new_row_, modify_row.full_row_))) {
       } else if (upd_ctdef.is_primary_index_ && OB_FAIL(dml_modify_rows_.push_back(modify_row))) {
+      } else if (upd_ctdef.is_primary_index_
+                 && OB_FAIL(ObAiColumnRuntime::record_row(*this, upd_ctdef,
+                             static_cast<int64_t>(ObDmlEventType::DE_UPDATING),
+                             ctx_.get_allocator(), ai_pending_rows_))) {
       } else {
         ++upd_rtdef.found_rows_;
       }
