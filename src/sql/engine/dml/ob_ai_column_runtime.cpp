@@ -363,10 +363,12 @@ int ObAiColumnRuntime::schedule_row(ObTableModifyOp &op,
   if (OB_SUCC(ret) && need_schedule && OB_NOT_NULL(row)) {
     common::ObArenaAllocator alloc(ObModIds::OB_MODULE_PAGE_ALLOCATOR, OB_MALLOC_NORMAL_BLOCK_SIZE);
     ObSEArray<AiColumnMeta, 8> metas;
-    bool started = false;
+    // The inner connection shares the session of the statement, so the task
+    // rows join its transaction. A nested session is deliberately not used:
+    // saving and restoring the session state breaks a LOB write that is still
+    // in flight, which showed up as an internal error on unrelated inserts.
     if (OB_FAIL(op.ensure_inner_conn())) {
-    } else if (OB_FAIL(op.begin_nested_session(false))) {
-    } else if (FALSE_IT(started = true)) {
+      ai_trace("[ai] inner conn failed ret=%d\n", ret);
     } else if (OB_FAIL(load_ai_columns(op, table_id, alloc, metas))) {
       ai_trace("[ai] load_meta failed table_id=%lu ret=%d\n",
                static_cast<unsigned long>(table_id), ret);
@@ -413,12 +415,6 @@ int ObAiColumnRuntime::schedule_row(ObTableModifyOp &op,
                    static_cast<unsigned long>(meta.column_id_),
                    rowkey_predicate.length(), rowkey_predicate.ptr());
         }
-      }
-    }
-    if (started) {
-      const int end_ret = op.end_nested_session();
-      if (OB_SUCCESS != end_ret && OB_SUCC(ret)) {
-        ret = end_ret;
       }
     }
   }
