@@ -308,9 +308,10 @@ int ObAiColumnRuntime::schedule_row(ObTableModifyOp &op,
   if (is_inner_table(table_id)) {
     // AI columns only exist on user tables, and bootstrap inserts into the
     // system tables before __all_ai_column is created.
-  } else if (OB_FAIL(has_ai_column(op, table_id, need_schedule))) {
-  } else if (!need_schedule) {
-    LOG_INFO("table has no ai column", K(table_id));
+  } else if (FALSE_IT(need_schedule = true)) {
+    // The metadata query below is the only reliable source: the table schema
+    // returned by id does not necessarily carry the hidden columns that back
+    // an AI column, so scanning them reported "no AI column" for every table.
   } else if (ObDmlEventType::DE_DELETING == event) {
     row = &ctdef.old_row_;
   } else {
