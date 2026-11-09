@@ -2511,7 +2511,11 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     char names_buf[share::schema::ObAiColumnSchema::MAX_DEP_LEN];
     int64_t ids_pos = 0;
     int64_t names_pos = 0;
-    if (OB_FAIL(lookup_table_schema->get_rowkey_info().get_column_ids(rowkey_ids))) {
+    // The rowkey of a table that is being created is only built later, and
+    // get_column_ids() reports an internal error when the rowkey array is not
+    // allocated yet. The list is a cache for the DML path, so it is optional.
+    if (lookup_table_schema->get_rowkey_info().get_size() <= 0) {
+    } else if (OB_FAIL(lookup_table_schema->get_rowkey_info().get_column_ids(rowkey_ids))) {
     } else {
       for (int64_t i = 0; OB_SUCC(ret) && i < rowkey_ids.count(); ++i) {
         const ObColumnSchemaV2 *col = lookup_table_schema->get_column_schema(rowkey_ids.at(i));
