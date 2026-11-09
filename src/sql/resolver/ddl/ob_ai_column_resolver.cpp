@@ -176,58 +176,57 @@ int ObAiColumnResolver::parse_ai_expr(common::ObIAllocator &allocator,
   if (OB_ISNULL(ai_expr) || ai_expr->type_ != T_FUN_SYS || ai_expr->num_child_ < 1) {
     ret = OB_NOT_SUPPORTED;
     LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN requires an AI function call");
+  } else {
+    ParseNode *name_node = ai_expr->children_[0];
+    if (OB_ISNULL(name_node) || OB_ISNULL(name_node->str_value_)) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN requires an AI function call");
     } else {
-      ParseNode *name_node = ai_expr->children_[0];
-      if (OB_ISNULL(name_node) || OB_ISNULL(name_node->str_value_)) {
+      common::ObString raw_name(name_node->str_len_, name_node->str_value_);
+      common::ObString lower_name;
+      if (OB_FAIL(ob_write_string(allocator, raw_name, lower_name))) {
+      } else if (0 != lower_name.compare(ObString::make_string("AI_COMPLETE"))
+                 && 0 != lower_name.compare(ObString::make_string("AI_EMBED"))) {
         ret = OB_NOT_SUPPORTED;
-        LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN requires an AI function call");
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN only supports AI_COMPLETE and AI_EMBED");
       } else {
-        common::ObString raw_name(name_node->str_len_, name_node->str_value_);
-        common::ObString lower_name;
-        if (OB_FAIL(ob_write_string(allocator, raw_name, lower_name))) {
-        } else if (0 != lower_name.compare(ObString::make_string("AI_COMPLETE"))
-                   && 0 != lower_name.compare(ObString::make_string("AI_EMBED"))) {
-          ret = OB_NOT_SUPPORTED;
-          LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN only supports AI_COMPLETE and AI_EMBED");
-        } else {
-          // Lower case the function name so the metadata is stable.
-          for (int64_t i = 0; i < lower_name.length(); ++i) {
-            char &c = const_cast<char &>(lower_name.ptr()[i]);
-            if (c >= 'A' && c <= 'Z') {
-              c = static_cast<char>(c - 'A' + 'a');
-            }
+        // Lower case the function name so the metadata is stable.
+        for (int64_t i = 0; i < lower_name.length(); ++i) {
+          char &c = const_cast<char &>(lower_name.ptr()[i]);
+          if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
           }
-          func_name = lower_name;
-          ParseNode *arg_list = ai_expr->num_child_ > 1 ? ai_expr->children_[1] : NULL;
-          if (OB_ISNULL(arg_list) || arg_list->num_child_ < 1) {
+        }
+        func_name = lower_name;
+        ParseNode *arg_list = ai_expr->num_child_ > 1 ? ai_expr->children_[1] : NULL;
+        if (OB_ISNULL(arg_list) || arg_list->num_child_ < 1) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN requires at least a model name");
+        } else {
+          ParseNode *model_node = arg_list->children_[0];
+          if (OB_ISNULL(model_node) || OB_ISNULL(model_node->str_value_)) {
             ret = OB_NOT_SUPPORTED;
-            LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN requires at least a model name");
+            LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN requires a model name");
           } else {
-            ParseNode *model_node = arg_list->children_[0];
-            if (OB_ISNULL(model_node) || OB_ISNULL(model_node->str_value_)) {
-              ret = OB_NOT_SUPPORTED;
-              LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN requires a model name");
+            common::ObString raw_model(model_node->str_len_, model_node->str_value_);
+            if (OB_FAIL(ob_write_string(allocator, raw_model, model_name))) {
             } else {
-              common::ObString raw_model(model_node->str_len_, model_node->str_value_);
-              if (OB_FAIL(ob_write_string(allocator, raw_model, model_name))) {
-              } else {
-                if (is_ai_embed_func(func_name) && arg_list->num_child_ >= 3) {
-                  ParseNode *dim_node = arg_list->children_[2];
-                  if (OB_NOT_NULL(dim_node) && OB_NOT_NULL(dim_node->str_value_)) {
-                    dim = strtoll(dim_node->str_value_, NULL, 10);
-                  }
+              if (is_ai_embed_func(func_name) && arg_list->num_child_ >= 3) {
+                ParseNode *dim_node = arg_list->children_[2];
+                if (OB_NOT_NULL(dim_node) && OB_NOT_NULL(dim_node->str_value_)) {
+                  dim = strtoll(dim_node->str_value_, NULL, 10);
                 }
-                if (OB_SUCC(ret)) {
-                  ret = build_expr_text(allocator, ai_expr, expr_text);
-                }
-                // The argument after the model name is the value the model
-                // receives. Keep its source text so the worker can evaluate it
-                // later with an ordinary SELECT.
-                if (OB_SUCC(ret) && arg_list->num_child_ > 1) {
-                  ParseNode *value_node = arg_list->children_[1];
-                  if (OB_NOT_NULL(value_node)) {
-                    ret = build_expr_text(allocator, value_node, arg_expr_text);
-                  }
+              }
+              if (OB_SUCC(ret)) {
+                ret = build_expr_text(allocator, ai_expr, expr_text);
+              }
+              // The argument after the model name is the value the model
+              // receives. Keep its source text so the worker can evaluate it
+              // later with an ordinary SELECT.
+              if (OB_SUCC(ret) && arg_list->num_child_ > 1) {
+                ParseNode *value_node = arg_list->children_[1];
+                if (OB_NOT_NULL(value_node)) {
+                  ret = build_expr_text(allocator, value_node, arg_expr_text);
                 }
               }
             }
