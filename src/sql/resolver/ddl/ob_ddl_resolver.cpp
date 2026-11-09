@@ -26,7 +26,6 @@
 #include "sql/engine/expr/ob_expr_lob_utils.h"
 #include "sql/rewrite/ob_transform_pre_process.h"
 #include "sql/resolver/ddl/ob_ai_column_resolver.h"
-#include "share/ob_ai_diag.h"
 #include "sql/resolver/ddl/ob_vec_index_builder_util.h"
 #include "sql/resolver/ddl/ob_fts_parser_resolver.h"
 #include "sql/session/ob_local_session_var.h"
@@ -2288,10 +2287,7 @@ int ObDDLResolver::resolve_normal_column_attribute(ObColumnSchemaV2 &column,
         // The node carries the AI expression and the optional WITH list.
         // The configuration is validated here and stored on the table schema
         // so the DDL executor can persist it and create the hidden columns.
-        ObAiDiag::trace("AI resolver: T_AI_COLUMN_DEFINITION branch, attr=%p num_child=%d\n",
-                        (void *)attr_node, attr_node ? attr_node->num_child_ : -1);
         if (OB_FAIL(resolve_ai_column_attribute(column, attr_node))) {
-          ObAiDiag::trace("AI resolver: resolve_ai_column_attribute failed ret=%d\n", ret);
         }
         break;
       }
@@ -2389,20 +2385,10 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     }
   }
 
-  ObAiDiag::trace("AI resolver: enter, ai_expr=%p option=%p\n", (void *)ai_expr, (void *)option_node);
   if (OB_SUCC(ret)) {
     if (OB_FAIL(ObAiColumnResolver::parse_ai_expr(*allocator_, ai_expr, func_name,
                                                   model_name, expr_text, dim))) {
-      ObAiDiag::trace("AI resolver: parse_ai_expr failed ret=%d\n", ret);
     } else if (OB_FAIL(ObAiColumnResolver::parse_ai_options(option_node, sync_mode, max_retries))) {
-      ObAiDiag::trace("AI resolver: parse_ai_options failed ret=%d\n", ret);
-    } else {
-      ObAiDiag::trace("AI resolver: parsed func=%.*s model=%.*s dim=%ld retries=%ld mode=%.*s expr=%.*s\n",
-                      func_name.length(), func_name.ptr(),
-                      model_name.length(), model_name.ptr(),
-                      dim, max_retries,
-                      sync_mode.length(), sync_mode.ptr(),
-                      expr_text.length(), expr_text.ptr());
     }
   }
 
@@ -2450,7 +2436,6 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
   }
 
   if (OB_SUCC(ret)) {
-    ObAiDiag::trace("AI resolver: before fill metadata\n");
     ai_column.column_id_ = column.get_column_id();
     if (OB_INVALID_ID == ai_column.column_id_) {
       // A column added by ALTER receives its column id in the DDL service after
@@ -2468,13 +2453,9 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     } else if (OB_FAIL(ai_column.set_expr_text(expr_text))) {
     } else if (OB_FAIL(ai_column.set_normalized_expr(normalized_expr))) {
     } else if (OB_FAIL(table_schema->add_ai_column(ai_column))) {
-      ObAiDiag::trace("AI resolver: add_ai_column failed ret=%d\n", ret);
-    } else {
-      ObAiDiag::trace("AI resolver: metadata added, ai_col_count=%ld\n", table_schema->get_ai_column_count());
     }
   }
 
-  ObAiDiag::trace("AI resolver: exit ret=%d\n", ret);
   return ret;
 }
 

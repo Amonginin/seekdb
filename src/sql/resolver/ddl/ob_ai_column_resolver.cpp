@@ -16,7 +16,6 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/resolver/ddl/ob_ai_column_resolver.h"
-#include "share/ob_ai_diag.h"
 #include "lib/utility/utility.h"
 #include "sql/parser/parse_node.h"
 #include "share/ob_errno.h"
@@ -173,18 +172,11 @@ int ObAiColumnResolver::parse_ai_expr(common::ObIAllocator &allocator,
 {
   int ret = OB_SUCCESS;
   dim = OB_INVALID_ID;
-  ObAiDiag::trace("AI parse_expr: node=%p type=%d num_child=%d\n",
-                  (void *)ai_expr, ai_expr ? (int)ai_expr->type_ : -1,
-                  ai_expr ? ai_expr->num_child_ : -1);
   if (OB_ISNULL(ai_expr) || ai_expr->type_ != T_FUN_SYS || ai_expr->num_child_ < 1) {
     ret = OB_NOT_SUPPORTED;
     LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN requires an AI function call");
     } else {
       ParseNode *name_node = ai_expr->children_[0];
-      ObAiDiag::trace("AI parse_expr: name_node=%p type=%d str=%p len=%ld\n",
-                      (void *)name_node, name_node ? (int)name_node->type_ : -1,
-                      name_node ? name_node->str_value_ : NULL,
-                      name_node ? name_node->str_len_ : -1);
       if (OB_ISNULL(name_node) || OB_ISNULL(name_node->str_value_)) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN requires an AI function call");
@@ -206,18 +198,11 @@ int ObAiColumnResolver::parse_ai_expr(common::ObIAllocator &allocator,
           }
           func_name = lower_name;
           ParseNode *arg_list = ai_expr->num_child_ > 1 ? ai_expr->children_[1] : NULL;
-          ObAiDiag::trace("AI parse_expr: func=%.*s arg_list=%p type=%d cnt=%d\n",
-                          lower_name.length(), lower_name.ptr(),
-                          (void *)arg_list, arg_list ? (int)arg_list->type_ : -1,
-                          arg_list ? arg_list->num_child_ : -1);
           if (OB_ISNULL(arg_list) || arg_list->num_child_ < 1) {
             ret = OB_NOT_SUPPORTED;
             LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN requires at least a model name");
           } else {
             ParseNode *model_node = arg_list->children_[0];
-            ObAiDiag::trace("AI parse_expr: model_node=%p type=%d str=%p\n",
-                            (void *)model_node, model_node ? (int)model_node->type_ : -1,
-                            model_node ? model_node->str_value_ : NULL);
             if (OB_ISNULL(model_node) || OB_ISNULL(model_node->str_value_)) {
               ret = OB_NOT_SUPPORTED;
               LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN requires a model name");
@@ -316,8 +301,6 @@ int ObAiColumnResolver::parse_ai_options(ParseNode *option_node,
   if (OB_ISNULL(option_node)) {
     // no options, the defaults stay in place
   } else {
-    ObAiDiag::trace("AI parse_opts: option_node type=%d cnt=%d\n",
-                    (int)option_node->type_, option_node->num_child_);
     ret = collect_ai_options(option_node, sync_mode, max_retries);
   }
   return ret;
