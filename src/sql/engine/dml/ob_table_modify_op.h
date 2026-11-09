@@ -66,7 +66,7 @@ public:
                                 const common::ObObjPrintParams &print_params)
   {
     int ret = OB_SUCCESS;
-    ObExprPtrIArray row_ptrs;
+    ObSEArray<ObExpr *, 16> row_ptrs;
     for (int64_t i = 0; OB_SUCC(ret) && i < row.count(); ++i) {
       if (OB_FAIL(row_ptrs.push_back(row.at(i)))) {
       }
