@@ -21,6 +21,7 @@
 #include "query/session/ob_inner_sql_connection_access.h"
 #include "sql/engine/ob_physical_plan.h"
 #include "sql/engine/dml/ob_dml_service.h"
+#include "sql/engine/dml/ob_ai_column_runtime.h"
 
 namespace oceanbase
 {
@@ -1056,10 +1057,36 @@ int ObTableModifyOp::submit_all_dml_task()
                 OB_FAIL(dml_rtctx_.das_ref_.pick_del_task_to_first())) {
     } else if (OB_FAIL(dml_rtctx_.das_ref_.execute_all_task())) {
     } else if (OB_FAIL(dml_rtctx_.das_ref_.close_all_task())) {
+    } else if (OB_FAIL(schedule_ai_columns_for_rows())) {
     } else if (OB_FAIL(ObDMLService::handle_after_row_processing(this, &get_dml_modify_row_list()))) {
     } else {
       dml_modify_rows_.clear();
       dml_rtctx_.reuse();
+    }
+  }
+  return ret;
+}
+
+// The AI column task rows are written here rather than from the row loops: at
+// this point every DAS buffer of the statement has been flushed, which is the
+// same condition the foreign key checks rely on for their nested session.
+int ObTableModifyOp::schedule_ai_columns_for_rows()
+{
+  int ret = OB_SUCCESS;
+  ObDMLModifyRowsList &rows = get_dml_modify_row_list();
+  ObDMLModifyRowsList::iterator it = rows.begin();
+  for (; OB_SUCC(ret) && it != rows.end(); ++it) {
+    ObDMLModifyRowNode &row = *it;
+    if (OB_ISNULL(row.dml_ctdef_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("the modify row carries no ctdef", K(ret));
+    } else {
+      int ai_ret = ObAiColumnRuntime::schedule_row(*this, *row.dml_ctdef_,
+                                                  static_cast<int64_t>(row.dml_event_));
+      if (OB_FAIL(ai_ret)) {
+        // A failure here must not fail the statement the user issued.
+        ObAiColumnRuntime::trace("[ai] schedule failed ret=%d\n", ai_ret);
+      }
     }
   }
   return ret;

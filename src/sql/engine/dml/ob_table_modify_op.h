@@ -290,6 +290,9 @@ public:
 
   ObDMLModifyRowsList& get_dml_modify_row_list() { return dml_modify_rows_;}
   int submit_all_dml_task();
+  // Writes the AI column task rows of the rows this statement modified. Runs at
+  // the end of the statement, once the DAS buffers are flushed.
+  int schedule_ai_columns_for_rows();
 
   int perform_batch_fk_check();
 protected:
