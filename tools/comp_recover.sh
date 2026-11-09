@@ -266,8 +266,19 @@ stage_test() {
   log "阶段 3/3：跑测例"
 
   # mock 服务
-  pkill -f ai_column_mock.py 2>/dev/null; sleep 1
-  pkill -f ai_function_mock.py 2>/dev/null; sleep 1
+  # 残留的 mock 会占住端口，让新 mock 绑不上而请求打到旧进程上，
+  # 表现为调用超时或"没有收到任何请求"。这里按端口强制回收。
+  pkill -9 -f ai_column_mock.py 2>/dev/null
+  pkill -9 -f ai_function_mock.py 2>/dev/null
+  for p in 8000 19120 19121 19122 19123 19124; do
+    local owners
+    owners=$(ss -lntp 2>/dev/null | grep ":${p} " | grep -o "pid=[0-9]*" | cut -d= -f2 | sort -u)
+    for pid in ${owners}; do
+      info "端口 ${p} 被 pid ${pid} 占用，强制结束"
+      kill -9 "${pid}" 2>/dev/null
+    done
+  done
+  sleep 2
   # 工作目录必须是 tools/deploy：测例里的 --exec 写的是 mysql_test/test_suite/...
   cd "${SRC_DIR}/tools/deploy" || die "找不到 tools/deploy"
   python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py start 19120 > "${LOG_DIR}/mock.log" 2>&1
