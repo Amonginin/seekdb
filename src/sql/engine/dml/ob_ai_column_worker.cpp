@@ -5,6 +5,7 @@
 #include <stdio.h>
 
 #include "lib/allocator/page_arena.h"
+#include "common/object/ob_object.h"
 #include "lib/ob_define.h"
 #include "lib/time/ob_time_utility.h"
 #include "share/ob_errno.h"
@@ -108,7 +109,11 @@ int load_column_meta(common::ObIAllocator &alloc,
       ObString arg_text;
       ObString func_name;
       ObString model;
-      if (OB_FAIL(result->get_varchar(static_cast<int64_t>(0), arg_text))) {
+      // arg_expr_text is nullable: read it as an object so a null value does
+      // not fail the task.
+      ObObj arg_obj;
+      if (OB_FAIL(result->get_obj(static_cast<int64_t>(0), arg_obj))) {
+      } else if (arg_obj.is_string() && OB_FAIL(arg_obj.get_string(arg_text))) {
       } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(1), func_name))) {
       } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(2), model))) {
       } else if (OB_FAIL(result->get_int(static_cast<int64_t>(3), max_retries))) {

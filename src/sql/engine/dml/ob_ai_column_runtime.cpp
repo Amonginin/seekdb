@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "common/object/ob_object.h"
 #include "common/mysqlclient/ob_mysql_proxy.h"
 #include "lib/time/ob_time_utility.h"
 #include "lib/utility/ob_print_utils.h"
@@ -261,15 +262,37 @@ int load_ai_columns(ObTableModifyOp &op,
         } else {
           while (OB_SUCC(ret) && OB_SUCC(result->next())) {
             AiColumnMeta meta;
-            ObString column_name;
-            ObString dep_ids;
-            if (OB_FAIL(result->get_uint(static_cast<int64_t>(0), meta.column_id_))) {
-            } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(1), column_name))) {
-            } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(2), dep_ids))) {
-            } else if (OB_FAIL(result->get_int(static_cast<int64_t>(3), meta.max_retries_))) {
-            } else if (OB_FAIL(ob_write_string(alloc, column_name, meta.column_name_))) {
-            } else if (OB_FAIL(ob_write_string(alloc, dep_ids, meta.dep_column_ids_))) {
-            } else if (OB_FAIL(metas.push_back(meta))) {
+            ObObj id_obj;
+            ObObj name_obj;
+            ObObj dep_obj;
+            ObObj retry_obj;
+            // get_obj() reports a null value as success, while the typed
+            // getters reject it. dep_column_ids is nullable by design.
+            if (OB_FAIL(result->get_obj(static_cast<int64_t>(0), id_obj))) {
+            } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(1), name_obj))) {
+            } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(2), dep_obj))) {
+            } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(3), retry_obj))) {
+            } else if (OB_UNLIKELY(!id_obj.is_integer() || !name_obj.is_string())) {
+              ret = OB_ERR_UNEXPECTED;
+              ai_trace_impl("[ai] load unexpected column types\n");
+            } else {
+              int64_t id_value = 0;
+              int64_t retry_value = 0;
+              ObString name;
+              ObString dep;
+              if (OB_FAIL(id_obj.get_int(id_value))) {
+              } else if (OB_FAIL(name_obj.get_string(name))) {
+              } else if (OB_FAIL(ob_write_string(alloc, name, meta.column_name_))) {
+              } else if (dep_obj.is_string()
+                         && OB_FAIL(dep_obj.get_string(dep))) {
+              } else if (OB_FAIL(ob_write_string(alloc, dep, meta.dep_column_ids_))) {
+              } else if (retry_obj.is_integer() && OB_FAIL(retry_obj.get_int(retry_value))) {
+              } else {
+                meta.column_id_ = static_cast<uint64_t>(id_value);
+                meta.max_retries_ = retry_value;
+                if (OB_FAIL(metas.push_back(meta))) {
+                }
+              }
             }
           }
           if (OB_ITER_END == ret) {
