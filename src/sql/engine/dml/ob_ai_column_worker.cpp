@@ -224,6 +224,7 @@ int ObAiColumnWorker::run_once()
 {
   int ret = OB_SUCCESS;
   char sql[1024];
+  alloc_.reset();
   snprintf(sql, sizeof(sql),
            "select t.table_id, t.request_id, t.column_id, t.column_name, "
            "t.rowkey_predicate, t.retry_count, d.database_name, tb.table_name "

@@ -35,6 +35,9 @@ public:
   // old row can be dropped when the primary key moved.
   common::ObString old_rowkey_predicate_;
   common::ObString changed_column_ids_;
+  // Names of the touched table, used to mark the row with its request id.
+  common::ObString database_name_;
+  common::ObString table_name_;
 };
 typedef common::ObSEArray<ObAiPendingRow, 8> ObAiPendingRowArray;
 

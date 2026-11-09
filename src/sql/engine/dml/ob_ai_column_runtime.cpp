@@ -10,6 +10,7 @@
 #include "common/mysqlclient/ob_mysql_proxy.h"
 #include "lib/time/ob_time_utility.h"
 #include "share/ob_errno.h"
+#include "share/schema/ob_database_schema.h"
 #include "share/schema/ob_schema_getter_guard.h"
 #include "share/schema/ob_table_schema.h"
 #include "sql/engine/dml/ob_dml_ctx_define.h"
@@ -328,14 +329,30 @@ int write_task_rows(ObTableModifyOp &op,
                      row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr());
           }
         } else if (ObDmlEventType::DE_UPDATING == event) {
-          // Same row, new value: restart the task so the worker picks it up.
-          snprintf(action, sizeof(action),
-                   "update %s set retry_count = 0, state = 0, eligible_ts = now() "
-                   "where table_id = %lu and rowkey_predicate = '%.*s' and column_id = %lu",
+          // Same row, new value: replace the task so a result that is still in
+          // flight for the previous request cannot be published.
+          char drop_sql[1024];
+          snprintf(drop_sql, sizeof(drop_sql),
+                   "delete from %s where table_id = %lu and rowkey_predicate = '%.*s' "
+                   "and column_id = %lu",
                    AI_TASK_TABLE_NAME,
                    static_cast<unsigned long>(row.table_id_),
                    row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr(),
                    static_cast<unsigned long>(meta.column_id_));
+          if (OB_FAIL(op.execute_write(drop_sql))) {
+          }
+          if (OB_SUCC(ret)) {
+            snprintf(action, sizeof(action),
+                     "insert into %s (table_id, request_id, column_id, column_name, "
+                     "rowkey_predicate, state, retry_count, eligible_ts) "
+                     "values (%lu, '%s', %lu, '%.*s', '%.*s', 0, 0, now())",
+                     AI_TASK_TABLE_NAME,
+                     static_cast<unsigned long>(row.table_id_),
+                     request_id,
+                     static_cast<unsigned long>(meta.column_id_),
+                     meta.column_name_.length(), meta.column_name_.ptr(),
+                     row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr());
+          }
         } else {
           snprintf(action, sizeof(action),
                    "insert into %s (table_id, request_id, column_id, column_name, "
@@ -352,6 +369,22 @@ int write_task_rows(ObTableModifyOp &op,
         } else if (OB_FAIL(op.execute_write(action))) {
           ai_trace_impl("[ai] flush write failed table_id=%lu ret=%d\n",
                         static_cast<unsigned long>(row.table_id_), ret);
+        } else if (ObDmlEventType::DE_DELETING != event) {
+          // Mark the row with the request that is now responsible for it. The
+          // worker only publishes a result when the marker still matches, so a
+          // result that arrives after a newer request cannot win.
+          char req_sql[2048];
+          snprintf(req_sql, sizeof(req_sql),
+                   "update `%.*s`.`%.*s` set `__ai_req_%.*s` = '%s' where %.*s",
+                   row.database_name_.length(), row.database_name_.ptr(),
+                   row.table_name_.length(), row.table_name_.ptr(),
+                   meta.column_name_.length(), meta.column_name_.ptr(),
+                   request_id,
+                   row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr());
+          if (OB_FAIL(op.execute_write(req_sql))) {
+            ai_trace_impl("[ai] mark request failed table_id=%lu ret=%d\n",
+                          static_cast<unsigned long>(row.table_id_), ret);
+          }
         }
       }
       if (OB_SUCC(ret)) {
@@ -398,8 +431,17 @@ int ObAiColumnRuntime::record_row(ObTableModifyOp &op,
     row.dml_event_ = dml_event;
     const ExprFixedArray &current = (ObDmlEventType::DE_DELETING == event)
                                         ? ctdef.old_row_ : ctdef.new_row_;
-    if (OB_FAIL(build_rowkey_predicate(op, *table_schema, ctdef, current, alloc,
-                                       row.rowkey_predicate_))) {
+    const share::schema::ObDatabaseSchema *database_schema = NULL;
+    if (OB_FAIL(schema_guard->get_database_schema(table_schema->get_database_id(),
+                                                 database_schema))) {
+    } else if (OB_ISNULL(database_schema)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(ob_write_string(alloc, database_schema->get_database_name_str(),
+                                       row.database_name_))) {
+    } else if (OB_FAIL(ob_write_string(alloc, table_schema->get_table_name_str(),
+                                       row.table_name_))) {
+    } else if (OB_FAIL(build_rowkey_predicate(op, *table_schema, ctdef, current, alloc,
+                                              row.rowkey_predicate_))) {
     } else if (ObDmlEventType::DE_UPDATING == event) {
       // The primary key may have moved: the task of the old row has to go.
       if (OB_FAIL(build_rowkey_predicate(op, *table_schema, ctdef, ctdef.old_row_, alloc,
