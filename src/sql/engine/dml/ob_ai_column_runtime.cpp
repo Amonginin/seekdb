@@ -5,6 +5,7 @@
 #include <atomic>
 #include <stdio.h>
 
+#include "lib/ob_define.h"
 #include "lib/time/ob_time_utility.h"
 #include "lib/utility/ob_print_utils.h"
 #include "share/ob_errno.h"
@@ -110,6 +111,12 @@ int load_ai_columns(ObTableModifyOp &op,
   SMART_VAR(ObMySQLProxy::MySQLResult, res) {
     sqlclient::ObMySQLResult *result = NULL;
     if (OB_FAIL(op.execute_read(sql, res))) {
+      // The metadata table may not exist yet while the system is bootstrapping.
+      // That simply means no row has an AI column, not that the DML must fail.
+      if (OB_TABLE_NOT_EXIST == ret) {
+        LOG_INFO("ai column metadata is not ready, skip scheduling", K(table_id));
+        ret = OB_SUCCESS;
+      }
     } else if (OB_ISNULL(result = res.get_result())) {
       ret = OB_ERR_UNEXPECTED;
     } else {
@@ -220,7 +227,11 @@ int ObAiColumnRuntime::create_tasks_for_insert(ObTableModifyOp &op,
   const uint64_t table_id = ctdef.das_base_ctdef_.index_tid_;
   ObSEArray<AiColumnMeta, 8> metas;
   bool started = false;
-  if (OB_FAIL(op.ensure_inner_conn())) {
+  // AI columns only exist on user tables. Bootstrap inserts into the system
+  // tables before __all_ai_column is created, so probing the metadata for an
+  // inner table would fail the bootstrap itself.
+  if (is_inner_table(table_id)) {
+  } else if (OB_FAIL(op.ensure_inner_conn())) {
   } else if (OB_FAIL(op.begin_nested_session(false))) {
   } else {
     started = true;
