@@ -3018,11 +3018,6 @@ int ObBasicSessionInfo::get_sql_quote_show_create(bool &sql_quote_show_create) c
   return get_bool_sys_var(SYS_VAR_SQL_QUOTE_SHOW_CREATE, sql_quote_show_create);
 }
 
-int ObBasicSessionInfo::get_enable_file_sql(bool &enable_file_sql) const
-{
-  return get_bool_sys_var(SYS_VAR_ENABLE_FILE_SQL, enable_file_sql);
-}
-
 int ObBasicSessionInfo::get_optimizer_cost_based_transformation(int64_t &cbqt_policy) const
 {
   int ret = get_int64_sys_var(SYS_VAR__OPTIMIZER_COST_BASED_TRANSFORMATION, cbqt_policy);

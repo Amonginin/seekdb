@@ -108,7 +108,6 @@ const char *ObSysVarMeta::SYS_VAR_NAMES_SORTED_BY_NAME[] = {
   "disabled_storage_engines",
   "disconnect_on_expired_password",
   "div_precision_increment",
-  "enable_file_sql",
   "enable_optimizer_rowgoal",
   "enforce_gtid_consistency",
   "eq_range_index_dive_limit",
@@ -831,7 +830,6 @@ const ObSysVarClassType ObSysVarMeta::SYS_VAR_IDS_SORTED_BY_NAME[] = {
   SYS_VAR_DISABLED_STORAGE_ENGINES,
   SYS_VAR_DISCONNECT_ON_EXPIRED_PASSWORD,
   SYS_VAR_DIV_PRECISION_INCREMENT,
-  SYS_VAR_ENABLE_FILE_SQL,
   SYS_VAR_ENABLE_OPTIMIZER_ROWGOAL,
   SYS_VAR_ENFORCE_GTID_CONSISTENCY,
   SYS_VAR_EQ_RANGE_INDEX_DIVE_LIMIT,
@@ -2191,8 +2189,7 @@ const char *ObSysVarMeta::SYS_VAR_NAMES_SORTED_BY_ID[] = {
   "ob_ivf_nprobes",
   "ob_hnsw_extra_info_max_size",
   "_push_join_predicate",
-  "ob_sparse_drop_ratio_search",
-  "enable_file_sql"
+  "ob_sparse_drop_ratio_search"
 };
 
 bool ObSysVarMeta::sys_var_name_case_cmp(const char *name1, const ObString &name2)

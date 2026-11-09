@@ -18,6 +18,7 @@
 
 #include "config_bridge.h"
 #include "sql/engine/dml/ob_table_insert_op.h"
+#include "sql/engine/dml/ob_ai_column_runtime.h"
 #include "sql/engine/dml/ob_dml_service.h"
 
 
@@ -230,6 +231,11 @@ OB_INLINE int ObTableInsertOp::insert_row_to_das()
       }
       if (OB_FAIL(ret)) {
         record_err_for_load_data(ret, ins_rtdef.cur_row_num_);
+      } else if (ins_ctdef.is_primary_index_) {
+        // Schedule the AI columns of this row in the transaction of the statement.
+        if (OB_FAIL(ObAiColumnRuntime::create_tasks_for_insert(*this, ins_ctdef, ins_ctdef.new_row_,
+                                                               ctx_.get_allocator()))) {
+        }
       }
     } // end for global index ctdef loop
     if (OB_SUCC(ret)) {
