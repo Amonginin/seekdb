@@ -983,13 +983,20 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
         }
       }
     }
+    // The columns added above are already in the schema; the AI hidden columns
+    // come after them.
+    const int32_t resolved_cols_count_after_hidden = resolved_cols.count();
 
     // Every AI column is backed by three hidden columns; they are appended to
     // the column list so that they are created together with the table.
     if (OB_SUCC(ret) && table_schema.get_ai_column_count() > 0) {
       if (OB_FAIL(add_ai_column_hidden_cols(table_schema, resolved_cols))) {
       } else {
-        for (int32_t i = resolved_cols_count; i < resolved_cols.count() && OB_SUCC(ret); i++) {
+        // The loop above already added the columns up to this point, so start
+        // after them. Adding the same column twice leaves the schema with a
+        // duplicated entry and the row values no longer line up with the
+        // column ids.
+        for (int32_t i = resolved_cols_count_after_hidden; i < resolved_cols.count() && OB_SUCC(ret); i++) {
           ObColumnSchemaV2 &hidden_col = resolved_cols.at(i);
           if (OB_FAIL(table_schema.add_column(hidden_col))) {
           } else {
