@@ -313,6 +313,16 @@ stage_test() {
     tail -40 /tmp/sdb/server.log
     die "实例启动失败（端口被占用）"
   fi
+  # 端口监听发生在初始化早期，实例可能之后才崩。等几秒再确认一次，
+  # 否则测试会在握手阶段每次等两分钟超时。
+  sleep 5
+  if ! kill -0 ${server_pid} 2>/dev/null; then
+    info "实例在端口就绪后退出，server.log 末尾："
+    tail -40 /tmp/sdb/server.log
+    info "崩溃信息（如果有）："
+    ls -t /tmp/sdb/log/*.log 2>/dev/null | head -1 | xargs -r tail -20
+    die "实例启动后崩溃"
+  fi
   info "✓ 实例已就绪（耗时 ${waited}s）"
 
   # 全新 bootstrap 的实例没有 test 库，而 mysqltest 用 --database=test 连接，
