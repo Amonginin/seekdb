@@ -128,6 +128,7 @@ struct ObSelectIntoItem
         max_file_size_(DEFAULT_MAX_FILE_SIZE),
         escaped_cht_(),
         buffer_size_(DEFAULT_BUFFER_SIZE),
+        has_header_(false),
         external_properties_()
   {
     field_str_.set_varchar(DEFAULT_FIELD_TERM_STR);
@@ -143,6 +144,7 @@ struct ObSelectIntoItem
     cs_type_ = ObCharset::get_system_collation();
   }
   int assign(const ObSelectIntoItem &other) {
+    int ret = common::OB_SUCCESS;
     into_type_ = other.into_type_;
     outfile_name_ = other.outfile_name_;
     field_str_ = other.field_str_;
@@ -154,8 +156,12 @@ struct ObSelectIntoItem
     escaped_cht_ = other.escaped_cht_;
     cs_type_ = other.cs_type_;
     buffer_size_ = other.buffer_size_;
+    has_header_ = other.has_header_;
     external_properties_ = other.external_properties_;
-    return user_vars_.assign(other.user_vars_);
+    if (OB_FAIL(ret = user_vars_.assign(other.user_vars_))) {
+    } else if (OB_FAIL(ret = header_names_.assign(other.header_names_))) {
+    }
+    return ret;
   }
   int deep_copy(ObIAllocator &allocator,
                 ObIRawExprCopier &copier,
@@ -171,6 +177,7 @@ struct ObSelectIntoItem
                K_(escaped_cht),
                K_(cs_type),
                K_(buffer_size),
+               K_(has_header),
                K_(external_properties));
   ObItemType into_type_;
   common::ObObj outfile_name_;
@@ -185,6 +192,9 @@ struct ObSelectIntoItem
   common::ObObj escaped_cht_;
   common::ObCollationType cs_type_;
   int64_t buffer_size_;
+  // copy ... to ... (header)：结果文件第一行写列名
+  bool has_header_;
+  common::ObSEArray<common::ObString, 16> header_names_;
   common::ObString external_properties_;
 
   static const char* const DEFAULT_FIELD_TERM_STR;

@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include "sql/resolver/dml/ob_dml_resolver.h"
+#include "sql/resolver/dml/ob_file_parquet_reader.h"
 #include "sql/resolver/dml/ob_file_table_util.h"
 #include "sql/parser/ob_parser.h"
 #include "sql/parser/parse_node.h"
@@ -219,6 +220,82 @@ const ParseNode *find_file_table_node(const ParseNode *node)
   return found;
 }
 
+// parquet 的列类型由文件自带，这里只做「物理类型 -> duck 类型」的映射与取值转文本
+int materialize_parquet(ObParquetFile &parquet, ObFileTableData &data)
+{
+  int ret = OB_SUCCESS;
+  const int64_t column_count = parquet.column_count();
+  const int64_t row_count = parquet.row_count();
+  if (column_count <= 0) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("parquet file has no column");
+  }
+  for (int64_t col = 0; OB_SUCC(ret) && col < column_count; ++col) {
+    const ObParquetColumn &column = parquet.column(col);
+    common::ObString name;
+    ObFileDuckType duck_type = OB_FILE_DUCK_VARCHAR;
+    if (OB_FAIL(data.copy_string(column.name_.ptr(), column.name_.length(), name))) {
+    } else if (OB_FAIL(data.add_column(name))) {
+    } else {
+      switch (column.physical_type_)
+      {
+        case 0: duck_type = OB_FILE_DUCK_BOOLEAN; break;          // BOOLEAN
+        case 1:                                                   // INT32
+        case 2: duck_type = OB_FILE_DUCK_BIGINT; break;           // INT64
+        case 4:                                                   // FLOAT
+        case 5: duck_type = OB_FILE_DUCK_DOUBLE; break;           // DOUBLE
+        case 6: duck_type = OB_FILE_DUCK_VARCHAR; break;          // BYTE_ARRAY
+        default:
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "this parquet physical type");
+          break;
+      }
+    }
+    if (OB_SUCC(ret) && OB_FAIL(data.set_column_type(col, duck_type, column.nullable_))) {
+    }
+  }
+  for (int64_t row = 0; OB_SUCC(ret) && row < row_count; ++row) {
+    for (int64_t col = 0; OB_SUCC(ret) && col < column_count; ++col) {
+      const ObParquetColumn &column = parquet.column(col);
+      const ObFileDuckType type = data.column(col).type_;
+      if (OB_ISNULL(column.values_) || row >= column.values_->count()) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        const ObParquetValue &value = column.values_->at(row);
+        if (value.is_null_) {
+          ret = data.add_cell(NULL, 0, true);
+        } else if (OB_FILE_DUCK_BOOLEAN == type) {
+          const char *text = (0 != value.num_) ? "true" : "false";
+          ret = data.add_cell(text, static_cast<int64_t>(strlen(text)), false);
+        } else if (OB_FILE_DUCK_BIGINT == type) {
+          char num_buf[64];
+          const int64_t num_len = snprintf(num_buf, sizeof(num_buf), "%ld", value.num_);
+          if (num_len <= 0) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            ret = data.add_cell(num_buf, num_len, false);
+          }
+        } else if (OB_FILE_DUCK_DOUBLE == type) {
+          char num_buf[64];
+          double real_value = 0.0;
+          MEMCPY(&real_value, &value.num_, sizeof(real_value));
+          const int64_t num_len = snprintf(num_buf, sizeof(num_buf), "%.17g", real_value);
+          if (num_len <= 0) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            ret = data.add_cell(num_buf, num_len, false);
+          }
+        } else {
+          ret = data.add_cell(value.str_.ptr(), value.str_.length(), false);
+        }
+      }
+    }
+    if (OB_SUCC(ret) && OB_FAIL(data.end_row())) {
+    }
+  }
+  return ret;
+}
+
 // 读文件 + 解析 + 推断，产出物化的表数据
 int build_file_data(const ParseNode &file_node,
                     common::ObIAllocator &alloc,
@@ -258,9 +335,17 @@ int build_file_data(const ParseNode &file_node,
         LOG_WARN("glob failed", K(path), K(ret));
       }
     } else if (4 == format) {
-      // parquet 需要 footer 与页解码，本轮先不启用
-      ret = OB_NOT_SUPPORTED;
-      LOG_USER_ERROR(OB_NOT_SUPPORTED, "read_parquet");
+      // parquet：footer 里的 schema 定列，页解码后取值转成文本
+      if (OB_FAIL(ob_file_read_all(path, alloc, buf, len))) {
+        LOG_WARN("read parquet file failed", K(path), K(ret));
+      } else {
+        ObParquetFile parquet(alloc);
+        if (OB_FAIL(parquet.parse(buf, len))) {
+          LOG_WARN("parse parquet failed", K(path), K(ret));
+        } else if (OB_FAIL(materialize_parquet(parquet, data))) {
+          LOG_WARN("materialize parquet failed", K(path), K(ret));
+        }
+      }
     } else if (OB_FAIL(ob_file_read_all(path, alloc, buf, len))) {
       LOG_WARN("read file failed", K(path), K(ret));
     } else if (1 == format) {

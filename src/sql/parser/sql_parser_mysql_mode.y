@@ -17651,51 +17651,53 @@ DESCRIBE select_no_parens
 }
 ;
 
-// copy (query) to 'path' (options)：直接脱糖成 select ... into outfile
+// copy (query) to 'path' (options)：脱糖成 select ... into outfile。
+// 选项统一收成 T_FILE_TABLE_OPTION(名字, 值)，供 copy_stmt 识别 header。
 copy_option:
 NAME_OB
 {
-  $$ = $1;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, $1, NULL);
 }
 | NAME_OB NAME_OB
 {
-  (void) $1;
-  $$ = $2;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, $1, $2);
 }
 | NAME_OB STRING_VALUE
 {
-  (void) $1;
-  $$ = $2;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, $1, $2);
 }
 | NAME_OB COMP_EQ NAME_OB
 {
-  (void) $1;
-  $$ = $3;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, $1, $3);
 }
 | NAME_OB COMP_EQ STRING_VALUE
 {
-  (void) $1;
-  $$ = $3;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, $1, $3);
 }
 | FORMAT NAME_OB
 {
-  (void) $1;
-  $$ = $2;
+  // format 是保留 token，不是 NAME_OB，单独补一条
+  ParseNode *name_node = NULL;
+  make_name_node(name_node, result->malloc_pool_, "format");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, name_node, $2);
 }
 | FORMAT STRING_VALUE
 {
-  (void) $1;
-  $$ = $2;
+  ParseNode *name_node = NULL;
+  make_name_node(name_node, result->malloc_pool_, "format");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, name_node, $2);
 }
 | FORMAT COMP_EQ NAME_OB
 {
-  (void) $1;
-  $$ = $3;
+  ParseNode *name_node = NULL;
+  make_name_node(name_node, result->malloc_pool_, "format");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, name_node, $3);
 }
 | FORMAT COMP_EQ STRING_VALUE
 {
-  (void) $1;
-  $$ = $3;
+  ParseNode *name_node = NULL;
+  make_name_node(name_node, result->malloc_pool_, "format");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, name_node, $3);
 }
 ;
 
@@ -17706,29 +17708,73 @@ copy_option_list:
 }
 | copy_option
 {
-  (void) $1;
-  $$ = NULL;
+  $$ = $1;
 }
 | copy_option_list ',' copy_option
 {
-  (void) $1;
-  (void) $3;
-  $$ = NULL;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
 }
 ;
 
 copy_stmt:
 COPY '(' select_no_parens ')' TO STRING_VALUE '(' copy_option_list ')'
 {
-  // 目前只支持 csv：直接合成 format type 节点，其余选项忽略
+  // 目前只支持 csv：直接合成 format type 节点；header 打一个 T_FILE_HEADER 标记
   ParseNode *format_name = NULL;
   ParseNode *format_node = NULL;
   ParseNode *format_list = NULL;
+  ParseNode *header_node = NULL;
+  ParseNode *copy_mark_node = NULL;
+  ParseNode *header_link = NULL;
+  ParseNode *link_node = NULL;
   ParseNode *into_node = NULL;
-  (void) $8;
+  ParseNode *option = $8;
+  int has_header = 0;
+  while (NULL != option) {
+    ParseNode *item = option;
+    if (T_LINK_NODE == option->type_) {
+      item = option->children_[1];
+      option = option->children_[0];
+    } else {
+      option = NULL;
+    }
+    if (NULL != item && T_FILE_TABLE_OPTION == item->type_ && NULL != item->children_[0]) {
+      ParseNode *name_node = item->children_[0];
+      const char *name = (NULL != name_node->str_value_) ? name_node->str_value_
+                                                        : name_node->raw_text_;
+      const int name_len = (NULL != name_node->str_value_) ? name_node->str_len_
+                                                          : name_node->text_len_;
+      if (NULL != name && 6 == name_len) {
+        int i = 0;
+        int same = 1;
+        const char *word = "header";
+        for (i = 0; same && i < 6; ++i) {
+          char c = name[i];
+          if (c >= 'A' && c <= 'Z') {
+            c = (char)(c - 'A' + 'a');
+          }
+          if (c != word[i]) {
+            same = 0;
+          }
+        }
+        if (same) {
+          has_header = 1;
+        }
+      }
+    }
+  }
   make_name_node(format_name, result->malloc_pool_, "csv");
   malloc_non_terminal_node(format_node, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT_TYPE, 1, format_name);
-  merge_nodes(format_list, result, T_EXTERNAL_FILE_FORMAT, format_node);
+  // 恒定打一个 COPY 标记：resolve 时据此把分隔符切成逗号（DuckDB 的 csv 语义）
+  malloc_terminal_node(copy_mark_node, result->malloc_pool_, T_FILE_COPY);
+  malloc_non_terminal_node(link_node, result->malloc_pool_, T_LINK_NODE, 2, format_node, copy_mark_node);
+  if (has_header) {
+    malloc_terminal_node(header_node, result->malloc_pool_, T_FILE_HEADER);
+    malloc_non_terminal_node(header_link, result->malloc_pool_, T_LINK_NODE, 2, link_node, header_node);
+    merge_nodes(format_list, result, T_EXTERNAL_FILE_FORMAT, header_link);
+  } else {
+    merge_nodes(format_list, result, T_EXTERNAL_FILE_FORMAT, link_node);
+  }
   malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3, $6, format_list, NULL);
   $$ = $3;
   if (NULL == $$ || NULL != $$->children_[PARSE_SELECT_INTO_EXTRA]) {

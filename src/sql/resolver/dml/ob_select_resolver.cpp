@@ -2991,6 +2991,7 @@ int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, Ob
   int ret = OB_SUCCESS;
   bool has_format_type = false;
   bool has_cs_type = false;
+  bool is_copy = false;
   ObExternalFileFormat external_format;
   ParseNode* format_node = NULL;
   ParseNode* option_node = NULL;
@@ -3029,8 +3030,18 @@ int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, Ob
         ret = OB_ERR_UNEXPECTED;
       } else if (T_EXTERNAL_FILE_FORMAT_TYPE == option_node->type_
                  || T_CHARSET == option_node->type_) {
+      } else if (T_FILE_HEADER == option_node->type_) {
+        // copy ... to ... (format csv, header)
+        into_item.has_header_ = true;
+      } else if (T_FILE_COPY == option_node->type_) {
+        is_copy = true;
       } else if (OB_FAIL(ObResolverUtils::resolve_file_format(option_node, external_format, params_))) {
       }
+    }
+    if (OB_SUCC(ret) && is_copy) {
+      // COPY 写 CSV 用逗号分隔，DuckDB 语义；select into outfile 的默认值不动
+      external_format.csv_format_.field_term_str_.assign_ptr(",", 1);
+      external_format.csv_format_.line_term_str_.assign_ptr("\n", 1);
     }
     if (OB_SUCC(ret)
         && OB_FAIL(external_format.to_string_with_alloc(into_item.external_properties_, *allocator_, true))) {
@@ -3128,6 +3139,24 @@ int ObSelectResolver::resolve_into_clause(const ParseNode *node)
         }
       } else {
         //do nothing
+      }
+      // copy ... to ... (header)：表头就是 select 的列名/别名
+      if (OB_SUCC(ret) && into_item->has_header_) {
+        const int64_t select_count = select_stmt->get_select_item_size();
+        for (int64_t i = 0; OB_SUCC(ret) && i < select_count; ++i) {
+          const SelectItem &select_item = select_stmt->get_select_item(i);
+          ObString header_name = select_item.alias_name_;
+          if (header_name.empty() && NULL != select_item.expr_
+              && select_item.expr_->is_column_ref_expr()) {
+            header_name = static_cast<ObColumnRefRawExpr *>(select_item.expr_)->get_column_name();
+          }
+          if (header_name.empty()) {
+            header_name = select_item.expr_name_;
+          }
+          if (OB_FAIL(into_item->header_names_.push_back(header_name))) {
+            LOG_WARN("push header name failed", K(ret));
+          }
+        }
       }
       if (OB_SUCC(ret)) {
         select_stmt->set_select_into(into_item);

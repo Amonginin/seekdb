@@ -44,6 +44,7 @@ public:
         escaped_cht_(),
         cs_type_(CS_TYPE_INVALID),
         is_overwrite_(false),
+        header_names_(),
         external_properties_()
   {
   }
@@ -104,6 +105,14 @@ public:
   {
     is_overwrite_ = is_overwrite;
   }
+  inline void set_header_names(const common::ObIArray<common::ObString> &header_names)
+  {
+    int ret = common::OB_SUCCESS;
+    for (int i = 0; OB_SUCC(ret) && i < header_names.count(); ++i) {
+      if (OB_FAIL(header_names_.push_back(header_names.at(i)))) {
+      }
+    }
+  }
   inline void set_external_properties(const common::ObString &external_properties)
   {
     external_properties_.assign_ptr(external_properties.ptr(), external_properties.length());
@@ -160,6 +169,10 @@ public:
   {
     return is_overwrite_;
   }
+  inline const common::ObIArray<common::ObString> &get_header_names() const
+  {
+    return header_names_;
+  }
   inline common::ObString get_external_properties() const
   {
     return external_properties_;
@@ -187,6 +200,7 @@ private:
   common::ObObj escaped_cht_;
   common::ObCollationType cs_type_;
   bool is_overwrite_;
+  common::ObSEArray<common::ObString, 16, common::ModulePageAllocator, true> header_names_;
   common::ObString external_properties_;
 };
 }

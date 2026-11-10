@@ -2286,6 +2286,10 @@ typedef enum ObItemType
   T_FILE_TABLE_OPTION = 4926,
   // `DESCRIBE SELECT ...`：输出 DuckDB 形状的 6 列
   T_DESCRIBE_SELECT = 4927,
+  // `COPY ... TO ... (header)`：写 CSV 时带一行列名
+  T_FILE_HEADER = 4928,
+  // `COPY ... TO ...`：标记这是 COPY 脱糖出来的 into outfile
+  T_FILE_COPY = 4929,
   T_MAX //Attention: add a new type before T_MAX
 } ObItemType;
 

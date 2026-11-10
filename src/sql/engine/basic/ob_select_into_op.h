@@ -71,7 +71,8 @@ public:
       parallel_(1),
       buffer_size_(DEFAULT_BUFFER_SIZE),
       is_overwrite_(false),
-      external_properties_(alloc)
+      external_properties_(alloc),
+      header_names_(alloc)
   {
   }
 
@@ -91,6 +92,8 @@ public:
   int64_t buffer_size_;
   bool is_overwrite_;
   ObExternalFileFormat::StringData external_properties_;
+  // copy ... to ... (header)：要写进结果文件第一行的列名
+  common::ObFixedArray<common::ObString, common::ObIAllocator> header_names_;
   static const int64_t DEFAULT_MAX_FILE_SIZE = 256LL * 1024 * 1024;
   static const int64_t DEFAULT_BUFFER_SIZE = 1LL * 1024 * 1024;
 };
@@ -198,6 +201,7 @@ private:
   int init_env_common();
   int init_csv_env();
   void set_csv_format_options();
+  int write_csv_header(ObCsvFileWriter &data_writer);
 
   int get_row_str(const int64_t buf_len, bool is_first_row, char *buf, int64_t &pos);
   int into_dumpfile(ObExternalFileWriter *data_writer);
