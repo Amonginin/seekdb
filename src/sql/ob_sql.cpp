@@ -18,6 +18,7 @@
 #include "config_bridge.h"
 #include "sql/ob_sql.h"
 #include "sql/resolver/dml/ob_dml_stmt.h"
+#include "sql/engine/dml/ob_ai_column_runtime.h"
 #include "sql/resolver/dml/ob_select_stmt.h"
 #include "sql/resolver/expr/ob_raw_expr.h"
 #include "share/schema/ob_table_schema.h"
@@ -2135,6 +2136,11 @@ int check_one_ai_column(share::schema::ObSchemaGetterGuard &schema_guard,
                          static_cast<unsigned long>(column_id));
         }
       }
+      if (OB_FAIL(ret)) {
+        ob_ai_trace("[ai] strict column check tid=%lu cid=%lu ret=%d\n",
+                    static_cast<unsigned long>(table_id),
+                    static_cast<unsigned long>(column_id), ret);
+      }
     }
   }
   return ret;
@@ -2150,13 +2156,17 @@ int ObSql::check_ai_column_strict_read(ObSQLSessionInfo &session,
   int ret = OB_SUCCESS;
   bool strict = false;
   UNUSED(allocator);
-  if (OB_FAIL(session.get_ai_column_strict_read(strict))) {
+  const int get_ret = session.get_ai_column_strict_read(strict);
+  ob_ai_trace("[ai] strict get ret=%d on=%d stmt=%d\n", get_ret, strict,
+              static_cast<int>(stmt.get_stmt_type()));
+  if (OB_FAIL(get_ret)) {
   } else if (!strict) {
     // a session that does not ask for strict reads sees the partial results
   } else if (!ObStmt::is_dml_stmt(stmt.get_stmt_type())) {
     // only a statement that reads a table can reach an AI column
   } else if (OB_ISNULL(context.schema_guard_)) {
     ret = OB_ERR_UNEXPECTED;
+    ob_ai_trace("[ai] strict no schema guard\n");
   } else {
     ObDMLStmt &dml_stmt = static_cast<ObDMLStmt &>(stmt);
     common::ObSEArray<uint64_t, 16> table_ids;
@@ -2164,11 +2174,15 @@ int ObSql::check_ai_column_strict_read(ObSQLSessionInfo &session,
     if (OB_FAIL(collect_ai_column_refs(*context.schema_guard_, dml_stmt,
                                        table_ids, column_ids))) {
     }
+    ob_ai_trace("[ai] strict cols=%ld ret=%d\n", table_ids.count(), ret);
     for (int64_t i = 0; OB_SUCC(ret) && i < table_ids.count(); ++i) {
       if (OB_FAIL(check_one_ai_column(*context.schema_guard_, table_ids.at(i),
                                       column_ids.at(i)))) {
       }
     }
+  }
+  if (OB_FAIL(ret)) {
+    ob_ai_trace("[ai] strict reject ret=%d\n", ret);
   }
   return ret;
 }
