@@ -784,13 +784,18 @@ int ObAlterTableExecutor::execute_ai_column_retry(ObExecContext &ctx, ObAlterTab
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("incomplete ai column retry", K(ret), K(database_name), K(table_name),
              K(column_name));
-  } else if (OB_FAIL(schema_guard->get_table_id(database_name, table_name, false,
-                                                share::schema::ObSchemaGetterGuard::ALL_NON_HIDDEN_TYPES,
-                                                table_id))) {
+  } else if (FALSE_IT(table_id = stmt.get_alter_table_schema().get_table_id())) {
+  } else if (common::OB_INVALID_ID == table_id
+             && OB_FAIL(schema_guard->get_table_id(
+                 database_name, table_name, false,
+                 share::schema::ObSchemaGetterGuard::ALL_NON_HIDDEN_TYPES, table_id))) {
+    ob_ai_trace("[ai] retry table id failed ret=%d\n", ret);
   } else if (OB_INVALID_ID == table_id) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("the table of the retry is gone", K(ret), K(database_name), K(table_name));
   } else if (OB_FAIL(schema_guard->get_table_schema(table_id, table_schema))) {
+    ob_ai_trace("[ai] retry table schema failed ret=%d tid=%lu\n", ret,
+                static_cast<unsigned long>(table_id));
   } else if (OB_ISNULL(table_schema)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_ISNULL(column_schema = table_schema->get_column_schema(column_name))) {
@@ -816,7 +821,9 @@ int ObAlterTableExecutor::execute_ai_column_retry(ObExecContext &ctx, ObAlterTab
                column_name.length(), column_name.ptr(),
                predicate.length(), predicate.ptr());
       int64_t affected_rows = 0;
+      ob_ai_trace("[ai] retry sql=%s\n", sql);
       if (OB_FAIL(sql_proxy->write(sql, affected_rows))) {
+        ob_ai_trace("[ai] retry write failed ret=%d\n", ret);
         LOG_WARN("failed to clear the ai column", K(ret), KCSTRING(sql));
       }
     }

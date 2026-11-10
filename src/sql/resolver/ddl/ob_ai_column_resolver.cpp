@@ -618,7 +618,14 @@ int build_retry_node(common::ObIAllocator &allocator,
   } else if (node->type_ == T_OP_OR) {
     ret = build_retry_binary(allocator, node, column_name, " or ", text);
   } else if (node->type_ == T_OP_IN) {
-    ret = build_retry_binary(allocator, node, column_name, " in ", text);
+    // The right side of IN is an expression list, which carries no
+    // parentheses of its own.
+    if (OB_FAIL(append_raw(allocator, text, "(", 1))) {
+    } else if (OB_FAIL(build_retry_node(allocator, node->children_[0], column_name, text))) {
+    } else if (OB_FAIL(append_raw(allocator, text, " in (", 5))) {
+    } else if (OB_FAIL(build_retry_node(allocator, node->children_[1], column_name, text))) {
+    } else if (OB_FAIL(append_raw(allocator, text, "))", 2))) {
+    }
   } else {
     // Values, column references and function calls are rebuilt the same way
     // the stored expression is.
