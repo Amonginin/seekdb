@@ -67,9 +67,7 @@ struct AiTaskRow
   AiTaskRow()
     : table_id_(common::OB_INVALID_ID),
       column_id_(common::OB_INVALID_ID),
-      retry_count_(0),
-      state_(AI_TASK_PENDING),
-      eligible_ts_(0)
+      retry_count_(0)
   {}
   uint64_t table_id_;
   uint64_t column_id_;
@@ -79,10 +77,6 @@ struct AiTaskRow
   ObString database_name_;
   ObString table_name_;
   int64_t retry_count_;
-  int64_t state_;
-  // The time the task becomes due, in microseconds since the epoch. Zero
-  // means that it is due right away.
-  int64_t eligible_ts_;
 };
 
 // Doubles the characters that would end a SQL string literal.
@@ -658,14 +652,14 @@ int ObAiColumnWorker::run_once()
   // with the system tables fails with "tablet does not exist" in the session
   // of the server proxy.
   //
-  // The rows are not filtered here. A task row is removed as soon as it is
-  // done, so every row of the table is a task that still has to be worked on.
-  // The time a task becomes due is compared in C++ instead of in SQL: the
-  // column is a timestamp and the session of the server proxy has a time zone
-  // of its own, which makes the comparison in SQL unreliable.
+  // The rows are not filtered here at all. A task row is removed as soon as it
+  // is done or has run out of retries, so every row of the table is a task
+  // that still has to be worked on. Both the state and the due time are left
+  // out of the query: reading a timestamp column of an inner table through
+  // the server proxy fails with an object type error.
   snprintf(sql, sizeof(sql),
            "select table_id, request_id, column_id, column_name, rowkey_predicate, "
-           "retry_count, database_name, table_name, state, eligible_ts "
+           "retry_count, database_name, table_name "
            "from %s "
            "order by table_id, request_id, column_id "
            "limit %ld",
@@ -687,7 +681,6 @@ int ObAiColumnWorker::run_once()
         ObString predicate;
         ObString db_name;
         ObString table_name;
-        ObObj due_obj;
         if (OB_FAIL(result->get_uint(static_cast<int64_t>(0), row.table_id_))) {
         } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(1), request_id))) {
         } else if (OB_FAIL(result->get_uint(static_cast<int64_t>(2), row.column_id_))) {
@@ -696,34 +689,12 @@ int ObAiColumnWorker::run_once()
         } else if (OB_FAIL(result->get_int(static_cast<int64_t>(5), row.retry_count_))) {
         } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(6), db_name))) {
         } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(7), table_name))) {
-        } else if (OB_FAIL(result->get_int(static_cast<int64_t>(8), row.state_))) {
-        } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(9), due_obj))) {
-          // The due time is a timestamp. A result of a different type does
-          // not tell when the task is due, so the task is tried right away.
-          ret = OB_SUCCESS;
-        } else {
-          // The due time is read as an object because the column is a
-          // timestamp, and the getter of the result only knows datetime.
-          const common::ObObjType due_type = due_obj.get_type();
-          int64_t value = 0;
-          int value_ret = OB_SUCCESS;
-          if (common::ob_is_datetime(due_type)) {
-            value_ret = due_obj.get_datetime(value);
-          } else if (common::ObTimestampType == due_type) {
-            value_ret = due_obj.get_timestamp(value);
-          }
-          if (OB_SUCC(value_ret)) {
-            row.eligible_ts_ = value;
-          }
-        }
-        if (OB_SUCC(ret)) {
-          if (OB_FAIL(ob_write_string(alloc_, request_id, row.request_id_))) {
-          } else if (OB_FAIL(ob_write_string(alloc_, column_name, row.column_name_))) {
-          } else if (OB_FAIL(ob_write_string(alloc_, predicate, row.rowkey_predicate_))) {
-          } else if (OB_FAIL(ob_write_string(alloc_, db_name, row.database_name_))) {
-          } else if (OB_FAIL(ob_write_string(alloc_, table_name, row.table_name_))) {
-          } else if (OB_FAIL(rows.push_back(row))) {
-          }
+        } else if (OB_FAIL(ob_write_string(alloc_, request_id, row.request_id_))) {
+        } else if (OB_FAIL(ob_write_string(alloc_, column_name, row.column_name_))) {
+        } else if (OB_FAIL(ob_write_string(alloc_, predicate, row.rowkey_predicate_))) {
+        } else if (OB_FAIL(ob_write_string(alloc_, db_name, row.database_name_))) {
+        } else if (OB_FAIL(ob_write_string(alloc_, table_name, row.table_name_))) {
+        } else if (OB_FAIL(rows.push_back(row))) {
         }
       }
       if (OB_ITER_END == ret) {
@@ -732,28 +703,10 @@ int ObAiColumnWorker::run_once()
     }
   }
   ob_ai_trace("[aiw] round rows=%ld ret=%d\n", rows.count(), ret);
-  const int64_t now = ObTimeUtility::current_time();
   for (int64_t i = 0; OB_SUCC(ret) && i < rows.count(); ++i) {
-    const AiTaskRow &row = rows.at(i);
-    if (AI_TASK_FAILED == row.state_) {
-      // The task ran out of retries. It is cleaned up here, because the
-      // worker may have died before it could do it.
-      ob_ai_trace("[aiw] drop failed task rid=%.*s\n", row.request_id_.length(),
-                  row.request_id_.ptr());
-      if (OB_FAIL(drop_task(row.table_id_, row.request_id_, row.column_id_))) {
-      }
-      continue;
-    }
-    if (AI_TASK_PENDING != row.state_ && AI_TASK_RETRYING != row.state_) {
-      continue;
-    }
-    if (row.eligible_ts_ > 0 && row.eligible_ts_ > now) {
-      // The task has to wait before it is tried again.
-      continue;
-    }
-    ob_ai_trace("[aiw] task rid=%.*s cid=%lu state=%ld\n", row.request_id_.length(),
-                row.request_id_.ptr(), static_cast<unsigned long>(row.column_id_),
-                row.state_);
+    ob_ai_trace("[aiw] task rid=%.*s cid=%lu\n", rows.at(i).request_id_.length(),
+                rows.at(i).request_id_.ptr(),
+                static_cast<unsigned long>(rows.at(i).column_id_));
     // The rows of one request are neighbours, because the query orders them by
     // the request id.
     bool handled = false;
