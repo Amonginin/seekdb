@@ -177,23 +177,31 @@ PY
   [ -e "${DEVTOOLS}/bin/clang++-17" ] || ln -s clang++ "${DEVTOOLS}/bin/clang++-17"
 
   # 1e. Rust 1.98.1
+  #
+  # rust-toolchain.toml 钉了 5 个 target（含两个 iOS）。rustup 装工具链时会
+  # 读那个文件自动补装，iOS 的 std 组件有几百 MB，在 Linux 上下载极慢——
+  # 这一步曾经把实例拖到超时。
+  #
+  # 但本机只需要 x86_64-unknown-linux-gnu：cmake/Rust.cmake 只在 APPLE 和
+  # ANDROID 下才切 target，Linux 上就是宿主机三元组。所以只装这一个，
+  # 并用 RUSTUP_TOOLCHAIN 绕开工具链文件的自动补装。
   export PATH="$HOME/.cargo/bin:${PATH}"
   if ! command -v cargo >/dev/null 2>&1 || ! cargo --version 2>/dev/null | grep -q "1\.98\.1"; then
-    info "装 Rust 1.98.1"
+    info "装 Rust 1.98.1（只装 Linux target，iOS/Android 交叉编译用不到）"
     export RUSTUP_DIST_SERVER=https://rsproxy.cn
     export RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
     curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh \
-      | sh -s -- -y --default-toolchain none >/dev/null 2>&1
+      | sh -s -- -y --default-toolchain none > "${LOG_DIR}/rustup_init.log" 2>&1
     [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
     export PATH="$HOME/.cargo/bin:${PATH}"
-    # rust-toolchain.toml 钉了 5 个 target（含 iOS）。少装任何一个，编译时
-    # rustup 会去补装，而 aarch64-apple-ios 的 std 组件会冲突失败。
-    rustup toolchain install 1.98.1 --profile minimal --component clippy \
-      --target x86_64-unknown-linux-gnu \
-      --target x86_64-pc-windows-gnu \
-      --target aarch64-linux-android \
-      --target aarch64-apple-ios \
-      --target aarch64-apple-ios-sim >/dev/null 2>&1
+    # --no-self-update：工具链自更新会卡在网络请求上。
+    #
+    # 不带 --target 参数：rustup 会向上找 rust-toolchain.toml 并补装它列的
+    # 全部 5 个 target，iOS 那两个在这里纯属浪费时间和带宽。但只要当前目录
+    # 链路上有这个文件，rustup 就会照办——所以在 /tmp 下装，那里没有工具链
+    # 文件。装完再显式补上 Linux target。
+    ( cd /tmp && rustup toolchain install 1.98.1 --profile minimal --component clippy \
+        --no-self-update ) 2>&1 | tail -5
     rustup default 1.98.1 >/dev/null 2>&1
     mkdir -p "$HOME/.cargo"
     cat > "$HOME/.cargo/config.toml" <<'EOF'
@@ -214,23 +222,14 @@ EOF
   cmake --version 2>/dev/null | head -1 || die "cmake 缺失"
   cargo --version 2>/dev/null || die "cargo 缺失"
 
-  # 1f. toolchain 已在，但 target 可能不全。少一个 iOS target，
-  # 编译时 rustup 会补装并撞上组件冲突。
+  # 1f. 只要求 Linux target。少了它编译会失败，多装只是浪费时间。
   if command -v rustup >/dev/null 2>&1; then
-    local missing_targets=""
-    for t in x86_64-unknown-linux-gnu x86_64-pc-windows-gnu \
-             aarch64-linux-android aarch64-apple-ios aarch64-apple-ios-sim; do
-      if ! rustup target list --installed --toolchain 1.98.1 2>/dev/null | grep -qx "$t"; then
-        missing_targets="${missing_targets} ${t}"
-      fi
-    done
-    if [ -n "${missing_targets}" ]; then
-      info "补装缺失的 rust target:${missing_targets}"
+    if ! rustup target list --installed --toolchain 1.98.1 2>/dev/null | grep -qx "x86_64-unknown-linux-gnu"; then
+      info "补装 x86_64-unknown-linux-gnu"
       export RUSTUP_DIST_SERVER=https://rsproxy.cn
       export RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
-      # shellcheck disable=SC2086
-      rustup target add --toolchain 1.98.1 ${missing_targets} >/dev/null 2>&1 \
-        || die "rust target 补装失败：${missing_targets}"
+      rustup target add --toolchain 1.98.1 x86_64-unknown-linux-gnu 2>&1 | tail -3 \
+        || die "rust target 补装失败"
     fi
     rustup default 1.98.1 >/dev/null 2>&1
   fi
@@ -248,6 +247,12 @@ stage_build() {
   sync_source || die "同步代码失败，先解决网络或本地改动的问题"
 
   pkill -f "seekdb --base-dir" 2>/dev/null; sleep 2
+
+  # cargo 会向上找 rust/rust-toolchain.toml，发现缺 target 就去补装——
+  # iOS 的 std 有几百 MB，Linux 上下载极慢，这会拖垮整个编译。
+  # 设 RUSTUP_TOOLCHAIN 让它忽略工具链文件，只用已装好的 1.98.1。
+  export RUSTUP_TOOLCHAIN=1.98.1
+  export PATH="$HOME/.cargo/bin:${PATH}"
 
   # tee：屏幕上直接看进度，同时留一份日志备查。
   # 退出码取 PIPESTATUS[0]，$? 会拿到 tee 的返回值。
