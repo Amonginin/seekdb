@@ -502,35 +502,8 @@ stage_save() {
   fi
   mkdir -p "${NAS_DIR}"
 
-  # 1) 代码。这是唯一真正不能丢的东西。
-  #    魔搭实例是 clone 公开 fork 来的，没有写凭据，推送多半会失败；
-  #    失败不致命——本地开发机上已经推过了，这里只是再确认一次。
-  if [ -d "${SRC_DIR}/.git" ]; then
-    ( cd "${SRC_DIR}" && git log --oneline -1 ) || true
-    info "推送 origin（公开 fork）"
-    ( cd "${SRC_DIR}" && git push origin HEAD:2026-competition ) > "${LOG_DIR}/push_origin.log" 2>&1
-    if [ $? -ne 0 ]; then
-      info "  origin 推送未成功（实例上可能没有写凭据），忽略"
-      tail -3 "${LOG_DIR}/push_origin.log" | sed 's/^/    /'
-    fi
-    info "推送 s2026（提测仓库）"
-    ( cd "${SRC_DIR}" && git push s2026 HEAD:2026-competition ) > "${LOG_DIR}/push_s2026.log" 2>&1
-    if [ $? -ne 0 ]; then
-      info "  s2026 推送未成功，忽略"
-      tail -3 "${LOG_DIR}/push_s2026.log" | sed 's/^/    /'
-    fi
-    # 记下这次保存对应哪个提交，新实例恢复时用它对账
-    {
-      echo "local=$( cd "${SRC_DIR}" && git rev-parse HEAD 2>/dev/null )"
-      echo "branch=2026-competition"
-      echo "saved_at=$(date -Is)"
-    } > "${NAS_DIR}/saved_commit.txt" 2>/dev/null
-    info "✓ 已记录提交到 ${NAS_DIR}/saved_commit.txt"
-  else
-    info "! ${SRC_DIR} 不是 git 仓库，跳过推送"
-  fi
-
-  # 2) 源码包（含 .git 历史）。排除编译产物和依赖，它们单独存。
+  # 1) 源码包（含 .git 历史）。排除编译产物和依赖，它们单独存。
+  #    代码不需要另外推送：包里带着 .git，恢复后历史全在。
   info "打包源码（不含 build_release / deps）"
   if [ -d "${SRC_DIR}" ]; then
     pack "${NAS_DIR}/seekdb_src" \
@@ -539,21 +512,21 @@ stage_save() {
     info "✓ ${PACK_OUT}"
   fi
 
-  # 3) 依赖（bison / clang / cmake / obclient）。省掉 10 分钟的 rpm 解包。
+  # 2) 依赖（bison / clang / cmake / obclient）。省掉 10 分钟的 rpm 解包。
   if [ -d "${SRC_DIR}/deps/3rd" ]; then
     info "打包依赖 deps/3rd（耗时几分钟）"
     pack "${NAS_DIR}/deps3rd" -C "${SRC_DIR}/deps" 3rd || die "依赖打包失败"
     info "✓ ${PACK_OUT}"
   fi
 
-  # 4) Rust 工具链。5 个 target 重新下载很慢。
+  # 3) Rust 工具链。5 个 target 重新下载很慢。
   if [ -d "$HOME/.cargo" ]; then
     info "打包 Rust 工具链"
     pack "${NAS_DIR}/cargo" -C "$HOME" .cargo || die "Rust 打包失败"
     info "✓ ${PACK_OUT}"
   fi
 
-  # 5) 测试日志。判题失败时的现场证据，比二进制更难重造。
+  # 4) 测试日志。判题失败时的现场证据，比二进制更难重造。
   if [ -d /tmp/recover ]; then
     pack "${NAS_DIR}/recover_logs" -C /tmp recover && info "✓ ${PACK_OUT}"
   fi
@@ -665,11 +638,10 @@ stage_restore() {
     info "! build_release.tgz.part 存在但没有完整的包，说明上次没存完，忽略"
   fi
 
-  # 5) 对账：这次恢复出来的代码是哪个提交。
-  if [ -f "${NAS_DIR}/saved_commit.txt" ]; then
-    info "保存时记录的提交："
-    sed 's/^/  /' "${NAS_DIR}/saved_commit.txt"
-    ( cd "${SRC_DIR}" && git log --oneline -1 | sed 's/^/  当前 /' )
+  # 5) 对账：恢复出来的代码是哪个提交。
+  if [ -d "${SRC_DIR}/.git" ]; then
+    info "恢复出来的提交："
+    ( cd "${SRC_DIR}" && git log --oneline -1 | sed 's/^/  /' )
   fi
 
   info "--- 体检 ---"
