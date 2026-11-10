@@ -687,7 +687,7 @@ int ObAiColumnWorker::run_once()
         ObString predicate;
         ObString db_name;
         ObString table_name;
-        int64_t eligible_ts = 0;
+        ObObj due_obj;
         if (OB_FAIL(result->get_uint(static_cast<int64_t>(0), row.table_id_))) {
         } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(1), request_id))) {
         } else if (OB_FAIL(result->get_uint(static_cast<int64_t>(2), row.column_id_))) {
@@ -697,12 +697,24 @@ int ObAiColumnWorker::run_once()
         } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(6), db_name))) {
         } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(7), table_name))) {
         } else if (OB_FAIL(result->get_int(static_cast<int64_t>(8), row.state_))) {
-        } else if (OB_FAIL(result->get_datetime(static_cast<int64_t>(9), eligible_ts))) {
-          // A task without a due time is due right away.
+        } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(9), due_obj))) {
+          // The due time is a timestamp. A result of a different type does
+          // not tell when the task is due, so the task is tried right away.
           ret = OB_SUCCESS;
-          eligible_ts = 0;
         } else {
-          row.eligible_ts_ = eligible_ts;
+          // The due time is read as an object because the column is a
+          // timestamp, and the getter of the result only knows datetime.
+          const common::ObObjType due_type = due_obj.get_type();
+          int64_t value = 0;
+          int value_ret = OB_SUCCESS;
+          if (common::ob_is_datetime(due_type)) {
+            value_ret = due_obj.get_datetime(value);
+          } else if (common::ObTimestampType == due_type) {
+            value_ret = due_obj.get_timestamp(value);
+          }
+          if (OB_SUCC(value_ret)) {
+            row.eligible_ts_ = value;
+          }
         }
         if (OB_SUCC(ret)) {
           if (OB_FAIL(ob_write_string(alloc_, request_id, row.request_id_))) {
