@@ -20,6 +20,17 @@
 %locations
 %verbose
 %error-verbose
+/*
+ * 文件表函数（read_csv/read_json/read_parquet/glob）与 COPY 选项引入了 8 个
+ * 移进/归约冲突，全部由「')' 后面可选别名」「选项名与选项值同为 NAME_OB」
+ * 这类结构产生，按 bison 默认（移进）解析即为预期语义：
+ *   from read_csv('path') f   -> f 当表别名
+ *   from read_csv('path')     -> ')' 后直接是 WHERE/ORDER/EOF
+ * 声明 %expect 后 bison 会自行核对数量：数量一旦变化就报错，不会悄悄放过。
+ * 这也让 gen_parser.sh 在英文 locale 下不再输出冲突信息（该脚本按英文
+ * "conflict" 子串判定失败，中文 locale 下会漏判导致两端行为不一致）。
+ */
+%expect 8
 %code requires {
 #include "parse_node.h"
 }
