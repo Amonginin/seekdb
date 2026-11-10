@@ -358,6 +358,14 @@ int write_task_rows(ObTableModifyOp &op,
   // The connection shares the session of the statement, so the task rows join
   // its transaction without a nested session. Saving and restoring the session
   // around every write made the following writes fail with an internal error.
+  //
+  // The inner statement must be recognized as a nested one. Otherwise it ends
+  // its own statement and resets the nesting counter of the session, which
+  // makes the statement that triggered the flush fail with an internal error.
+  // The foreign key path marks the same flag for the same reason.
+  ObDASCtx &das_ctx = op.get_exec_ctx().get_das_ctx();
+  const uint64_t saved_das_flags = das_ctx.flags_;
+  das_ctx.is_fk_cascading_ = true;
   if (OB_FAIL(op.open_inner_conn())) {
     ai_trace_impl("[ai] write open_inner_conn ret=%d\n", ret);
   } else {
@@ -457,6 +465,7 @@ int write_task_rows(ObTableModifyOp &op,
       }
     }
   }
+  das_ctx.flags_ = saved_das_flags;
   return ret;
 }
 
