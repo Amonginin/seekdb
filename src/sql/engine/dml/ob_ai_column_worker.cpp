@@ -79,6 +79,107 @@ struct AiTaskRow
   int64_t retry_count_;
 };
 
+// Reads an integer column of any width. The typed getters of the result only
+// accept one exact type, so an int column read as int64 fails with an object
+// type error. A null value reads as zero.
+int obj_to_int(const common::ObObj &obj, int64_t &value)
+{
+  int ret = OB_SUCCESS;
+  value = 0;
+  if (obj.is_null()) {
+  } else if (!obj.is_integer_type()) {
+    ret = OB_OBJ_TYPE_ERROR;
+  } else {
+    switch (obj.get_type()) {
+      case common::ObTinyIntType: {
+        int8_t v = 0;
+        if (OB_FAIL(obj.get_tinyint(v))) {
+        } else {
+          value = v;
+        }
+        break;
+      }
+      case common::ObSmallIntType: {
+        int16_t v = 0;
+        if (OB_FAIL(obj.get_smallint(v))) {
+        } else {
+          value = v;
+        }
+        break;
+      }
+      case common::ObMediumIntType:
+      case common::ObInt32Type: {
+        int32_t v = 0;
+        if (OB_FAIL(obj.get_int32(v))) {
+        } else {
+          value = v;
+        }
+        break;
+      }
+      case common::ObIntType: {
+        int64_t v = 0;
+        if (OB_FAIL(obj.get_int(v))) {
+        } else {
+          value = v;
+        }
+        break;
+      }
+      case common::ObUTinyIntType: {
+        uint8_t v = 0;
+        if (OB_FAIL(obj.get_utinyint(v))) {
+        } else {
+          value = v;
+        }
+        break;
+      }
+      case common::ObUSmallIntType: {
+        uint16_t v = 0;
+        if (OB_FAIL(obj.get_usmallint(v))) {
+        } else {
+          value = v;
+        }
+        break;
+      }
+      case common::ObUMediumIntType:
+      case common::ObUInt32Type: {
+        uint32_t v = 0;
+        if (OB_FAIL(obj.get_uint32(v))) {
+        } else {
+          value = v;
+        }
+        break;
+      }
+      case common::ObUInt64Type: {
+        uint64_t v = 0;
+        if (OB_FAIL(obj.get_uint64(v))) {
+        } else {
+          value = v;
+        }
+        break;
+      }
+      default: {
+        ret = OB_OBJ_TYPE_ERROR;
+        break;
+      }
+    }
+  }
+  return ret;
+}
+
+// Reads a string column of any character type. A null value reads as an empty
+// string.
+int obj_to_string(const common::ObObj &obj, ObString &value)
+{
+  int ret = OB_SUCCESS;
+  value.reset();
+  if (obj.is_null()) {
+  } else if (!obj.is_string_type()) {
+    ret = OB_OBJ_TYPE_ERROR;
+  } else if (OB_FAIL(obj.get_string(value))) {
+  }
+  return ret;
+}
+
 // Doubles the characters that would end a SQL string literal.
 int escape_literal(common::ObIAllocator &alloc, const ObString &in, ObString &out)
 {
@@ -165,14 +266,14 @@ int load_column_meta(common::ObIAllocator &alloc,
       } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(2), model_obj))) {
       } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(3), retry_obj))) {
       } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(4), type_obj))) {
-      } else if (arg_obj.is_string_type() && OB_FAIL(arg_obj.get_string(arg_text))) {
-      } else if (func_obj.is_string_type() && OB_FAIL(func_obj.get_string(func_name))) {
-      } else if (model_obj.is_string_type() && OB_FAIL(model_obj.get_string(model))) {
+      } else if (OB_FAIL(obj_to_string(arg_obj, arg_text))) {
+      } else if (OB_FAIL(obj_to_string(func_obj, func_name))) {
+      } else if (OB_FAIL(obj_to_string(model_obj, model))) {
       } else if (OB_FAIL(ob_write_string(alloc, arg_text, arg_expr_text))) {
       } else if (OB_FAIL(ob_write_string(alloc, func_name, ai_func_name))) {
       } else if (OB_FAIL(ob_write_string(alloc, model, model_name))) {
-      } else if (retry_obj.is_integer_type() && OB_FAIL(retry_obj.get_int(max_retries))) {
-      } else if (type_obj.is_integer_type() && OB_FAIL(type_obj.get_int(result_type))) {
+      } else if (OB_FAIL(obj_to_int(retry_obj, max_retries))) {
+      } else if (OB_FAIL(obj_to_int(type_obj, result_type))) {
       }
     }
   }
@@ -275,8 +376,7 @@ int load_prompts(common::ObIAllocator &alloc,
             ObObj value_obj;
             ObString value;
             if (OB_FAIL(result->get_obj(i, value_obj))) {
-            } else if (value_obj.is_string_type()
-                       && OB_FAIL(value_obj.get_string(value))) {
+            } else if (OB_FAIL(obj_to_string(value_obj, value))) {
             } else if (OB_FAIL(ob_write_string(alloc, value, plans.at(i).prompt_))) {
             }
           }
@@ -423,7 +523,7 @@ bool is_stale_request(const uint64_t table_id,
       // No row means there is no newer request.
       stale = false;
     } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(0), count_obj))) {
-    } else if (count_obj.is_integer_type() && OB_FAIL(count_obj.get_int(count))) {
+    } else if (OB_FAIL(obj_to_int(count_obj, count))) {
     } else {
       stale = (count > 0);
     }
@@ -681,20 +781,44 @@ int ObAiColumnWorker::run_once()
         ObString predicate;
         ObString db_name;
         ObString table_name;
-        if (OB_FAIL(result->get_uint(static_cast<int64_t>(0), row.table_id_))) {
-        } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(1), request_id))) {
-        } else if (OB_FAIL(result->get_uint(static_cast<int64_t>(2), row.column_id_))) {
-        } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(3), column_name))) {
-        } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(4), predicate))) {
-        } else if (OB_FAIL(result->get_int(static_cast<int64_t>(5), row.retry_count_))) {
-        } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(6), db_name))) {
-        } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(7), table_name))) {
-        } else if (OB_FAIL(ob_write_string(alloc_, request_id, row.request_id_))) {
-        } else if (OB_FAIL(ob_write_string(alloc_, column_name, row.column_name_))) {
-        } else if (OB_FAIL(ob_write_string(alloc_, predicate, row.rowkey_predicate_))) {
-        } else if (OB_FAIL(ob_write_string(alloc_, db_name, row.database_name_))) {
-        } else if (OB_FAIL(ob_write_string(alloc_, table_name, row.table_name_))) {
-        } else if (OB_FAIL(rows.push_back(row))) {
+        ObObj id_obj;
+        ObObj request_obj;
+        ObObj column_obj;
+        ObObj name_obj;
+        ObObj predicate_obj;
+        ObObj retry_obj;
+        ObObj db_obj;
+        ObObj table_obj;
+        int64_t id_value = 0;
+        int64_t column_value = 0;
+        if (OB_FAIL(result->get_obj(static_cast<int64_t>(0), id_obj))) {
+        } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(1), request_obj))) {
+        } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(2), column_obj))) {
+        } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(3), name_obj))) {
+        } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(4), predicate_obj))) {
+        } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(5), retry_obj))) {
+        } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(6), db_obj))) {
+        } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(7), table_obj))) {
+        } else if (OB_FAIL(obj_to_int(id_obj, id_value))) {
+        } else if (OB_FAIL(obj_to_int(column_obj, column_value))) {
+        } else if (OB_FAIL(obj_to_int(retry_obj, row.retry_count_))) {
+        } else if (OB_FAIL(obj_to_string(request_obj, request_id))) {
+        } else if (OB_FAIL(obj_to_string(name_obj, column_name))) {
+        } else if (OB_FAIL(obj_to_string(predicate_obj, predicate))) {
+        } else if (OB_FAIL(obj_to_string(db_obj, db_name))) {
+        } else if (OB_FAIL(obj_to_string(table_obj, table_name))) {
+        } else {
+          row.table_id_ = static_cast<uint64_t>(id_value);
+          row.column_id_ = static_cast<uint64_t>(column_value);
+        }
+        if (OB_SUCC(ret)) {
+          if (OB_FAIL(ob_write_string(alloc_, request_id, row.request_id_))) {
+          } else if (OB_FAIL(ob_write_string(alloc_, column_name, row.column_name_))) {
+          } else if (OB_FAIL(ob_write_string(alloc_, predicate, row.rowkey_predicate_))) {
+          } else if (OB_FAIL(ob_write_string(alloc_, db_name, row.database_name_))) {
+          } else if (OB_FAIL(ob_write_string(alloc_, table_name, row.table_name_))) {
+          } else if (OB_FAIL(rows.push_back(row))) {
+          }
         }
       }
       if (OB_ITER_END == ret) {
