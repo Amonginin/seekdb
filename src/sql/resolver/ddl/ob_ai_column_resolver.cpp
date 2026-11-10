@@ -81,6 +81,74 @@ int append_text(common::ObIAllocator &allocator,
   return append_text(allocator, text, value.ptr(), value.length());
 }
 
+// Appends a piece of text with no separating space. Punctuation, quotes and
+// parentheses must stick to their neighbours, otherwise the rebuilt text is
+// no longer a valid expression.
+int append_raw(common::ObIAllocator &allocator,
+               common::ObString &text,
+               const char *value,
+               const int64_t length)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(value) || length <= 0) {
+    // nothing to append
+  } else {
+    const int64_t old_len = text.length();
+    const int64_t new_len = old_len + length;
+    char *buf = static_cast<char *>(allocator.alloc(new_len + 1));
+    if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      if (old_len > 0) {
+        MEMCPY(buf, text.ptr(), old_len);
+      }
+      MEMCPY(buf + old_len, value, length);
+      buf[new_len] = '\0';
+      text.assign_ptr(buf, new_len);
+    }
+  }
+  return ret;
+}
+
+// Appends a string literal with the quotes the parser needs, so the rebuilt
+// text can be parsed again.
+int append_quoted(common::ObIAllocator &allocator,
+                  common::ObString &text,
+                  const char *value,
+                  const int64_t length)
+{
+  int ret = OB_SUCCESS;
+  int64_t escaped = 0;
+  if (OB_ISNULL(value)) {
+    // An empty literal still has to carry its quotes.
+    ret = append_raw(allocator, text, "''", 2);
+  } else {
+    for (int64_t i = 0; i < length; ++i) {
+      if ('\'' == value[i] || '\\' == value[i]) {
+        escaped++;
+      }
+    }
+    char *buf = static_cast<char *>(allocator.alloc(length + escaped + 3));
+    if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      int64_t pos = 0;
+      buf[pos++] = '\'';
+      for (int64_t i = 0; i < length; ++i) {
+        const char c = value[i];
+        if ('\'' == c || '\\' == c) {
+          buf[pos++] = '\\';
+        }
+        buf[pos++] = c;
+      }
+      buf[pos++] = '\'';
+      buf[pos] = '\0';
+      ret = append_raw(allocator, text, buf, pos);
+    }
+  }
+  return ret;
+}
+
 // Rebuilds a readable text for a parse node. Only the shapes an AI column
 // expression can take are supported; anything else falls back to a marker so
 // the persisted expression stays well formed.
@@ -95,7 +163,7 @@ int build_node_text(common::ObIAllocator &allocator,
     if (OB_FAIL(append_text(allocator, text, node->str_value_, node->str_len_))) {
     }
   } else if (node->type_ == T_VARCHAR) {
-    if (OB_FAIL(append_text(allocator, text, node->str_value_, node->str_len_))) {
+    if (OB_FAIL(append_quoted(allocator, text, node->str_value_, node->str_len_))) {
     }
   } else if (node->type_ == T_INT || node->type_ == T_NUMBER) {
     if (OB_FAIL(append_text(allocator, text, node->str_value_, node->str_len_))) {
@@ -105,7 +173,7 @@ int build_node_text(common::ObIAllocator &allocator,
       if (OB_FAIL(build_node_text(allocator, node->children_[i], text))) {
       }
       if (OB_SUCC(ret) && i + 1 < node->num_child_) {
-        if (OB_FAIL(append_text(allocator, text, ",", 1))) {
+        if (OB_FAIL(append_raw(allocator, text, ",", 1))) {
         }
       }
     }
@@ -119,11 +187,15 @@ int build_node_text(common::ObIAllocator &allocator,
     }
   } else if (node->type_ == T_FUN_SYS) {
     if (OB_FAIL(build_node_text(allocator, node->children_[0], text))) {
-    } else if (OB_FAIL(append_text(allocator, text, "(", 1))) {
+    } else if (OB_FAIL(append_raw(allocator, text, "(", 1))) {
     } else if (node->num_child_ > 1 && OB_NOT_NULL(node->children_[1])) {
       if (OB_FAIL(build_node_text(allocator, node->children_[1], text))) {
       }
-    } else if (OB_FAIL(append_text(allocator, text, ")", 1))) {
+    }
+    // The closing parenthesis belongs to every call, whether the argument
+    // list is empty or not.
+    if (OB_SUCC(ret)) {
+      ret = append_raw(allocator, text, ")", 1);
     }
   } else if (node->num_child_ > 0) {
     // A generic node: render the first child, which is usually the operator
