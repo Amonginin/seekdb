@@ -104,6 +104,20 @@ public:
     alter_table_arg_.lock_session_create_ts_ = create_ts;
   }
   void set_lock_priority();
+
+  // `ALTER TABLE ... RETRY AI COLUMN <column> [WHERE ...]`. The statement is
+  // executed without the DDL service: it only recomputes a column of the rows
+  // that match the predicate.
+  bool has_ai_column_retry() const { return has_ai_column_retry_; }
+  void set_ai_column_retry(const common::ObString &column_name,
+                           const common::ObString &predicate)
+  {
+    has_ai_column_retry_ = true;
+    ai_column_retry_column_ = column_name;
+    ai_column_retry_predicate_ = predicate;
+  }
+  const common::ObString &get_ai_column_retry_column() const { return ai_column_retry_column_; }
+  const common::ObString &get_ai_column_retry_predicate() const { return ai_column_retry_predicate_; }
 private:
   obcall::ObAlterTableArg alter_table_arg_;
   bool is_comment_table_;
@@ -114,6 +128,9 @@ private:
   obcall::ObAlterTriggerArg tg_arg_;
   uint64_t alter_table_action_count_;
   obcall::ObExchangePartitionArg exchange_partition_arg_;
+  bool has_ai_column_retry_;
+  common::ObString ai_column_retry_column_;
+  common::ObString ai_column_retry_predicate_;
 };
 
 inline int ObAlterTableStmt::set_tz_info_wrap(const common::ObTimeZoneInfoWrap &tz_info_wrap)

@@ -29,6 +29,10 @@
 #include "sql/engine/cmd/ob_ddl_executor_util.h"
 #include "sql/resolver/ddl/ob_create_table_stmt.h"
 #include "sql/resolver/ddl/ob_alter_table_stmt.h"
+#include "sql/ob_sql_context.h"
+#include "share/schema/ob_schema_getter_guard.h"
+#include "share/schema/ob_table_schema.h"
+#include "oblib/common/mysqlclient/ob_mysql_proxy.h"
 #include "sql/resolver/ddl/ob_drop_table_stmt.h"
 #include "sql/resolver/ddl/ob_rename_table_stmt.h"
 #include "sql/resolver/ddl/ob_truncate_table_stmt.h"
@@ -751,6 +755,74 @@ int ObAlterTableExecutor::alter_table_exchange_partition_rpc(obcall::ObExchangeP
   return ret;
 }
 
+int ObAlterTableExecutor::execute_ai_column_retry(ObExecContext &ctx, ObAlterTableStmt &stmt)
+{
+  int ret = OB_SUCCESS;
+  ObSqlCtx *sql_ctx = NULL;
+  share::schema::ObSchemaGetterGuard *schema_guard = NULL;
+  const share::schema::ObTableSchema *table_schema = NULL;
+  const share::schema::ObColumnSchemaV2 *column_schema = NULL;
+  common::ObMySQLProxy *sql_proxy = ctx.get_sql_proxy();
+  const common::ObString &origin_db = stmt.get_org_database_name();
+  const common::ObString &origin_table = stmt.get_org_table_name();
+  const common::ObString &database_name =
+      origin_db.empty() ? stmt.get_database_name() : origin_db;
+  const common::ObString &table_name =
+      origin_table.empty() ? stmt.get_table_name() : origin_table;
+  const common::ObString &column_name = stmt.get_ai_column_retry_column();
+  const common::ObString &predicate = stmt.get_ai_column_retry_predicate();
+  uint64_t table_id = common::OB_INVALID_ID;
+  char *sql = NULL;
+  if (OB_ISNULL(sql_ctx = ctx.get_sql_ctx())
+      || OB_ISNULL(schema_guard = sql_ctx->schema_guard_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("no schema guard to retry an ai column", K(ret));
+  } else if (OB_ISNULL(sql_proxy)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (database_name.empty() || table_name.empty() || column_name.empty()) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("incomplete ai column retry", K(ret), K(database_name), K(table_name),
+             K(column_name));
+  } else if (OB_FAIL(schema_guard->get_table_id(database_name, table_name, false,
+                                                share::schema::ObSchemaGetterGuard::ALL_NON_HIDDEN_TYPES,
+                                                table_id))) {
+  } else if (OB_INVALID_ID == table_id) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("the table of the retry is gone", K(ret), K(database_name), K(table_name));
+  } else if (OB_FAIL(schema_guard->get_table_schema(table_id, table_schema))) {
+  } else if (OB_ISNULL(table_schema)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(column_schema = table_schema->get_column_schema(column_name))) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying an unknown column");
+  } else if (OB_ISNULL(table_schema->get_ai_column_by_column_id(
+                 column_schema->get_column_id()))) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
+  } else {
+    const int64_t capacity = database_name.length() + table_name.length()
+        + column_name.length() + predicate.length() + 128;
+    if (OB_ISNULL(sql = static_cast<char *>(ctx.get_allocator().alloc(capacity)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      // Clearing the column is the whole operation: the write path notices
+      // that a value of an AI column was cleared and creates a new request
+      // for the row, in the same transaction as the update.
+      snprintf(sql, capacity,
+               "update `%.*s`.`%.*s` set `%.*s` = null where %.*s",
+               database_name.length(), database_name.ptr(),
+               table_name.length(), table_name.ptr(),
+               column_name.length(), column_name.ptr(),
+               predicate.length(), predicate.ptr());
+      int64_t affected_rows = 0;
+      if (OB_FAIL(sql_proxy->write(sql, affected_rows))) {
+        LOG_WARN("failed to clear the ai column", K(ret), KCSTRING(sql));
+      }
+    }
+  }
+  return ret;
+}
+
 int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
 {
   int ret = OB_SUCCESS;
@@ -762,6 +834,11 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
   OV (OB_NOT_NULL(task_exec_ctx = GET_SQL_EXECUTOR_CTX(ctx)), OB_NOT_INIT);
   if (OB_FAIL(ret)) {
     // do nothing
+  } else if (stmt.has_ai_column_retry()) {
+    // The statement recomputes a column of the matching rows. It changes no
+    // schema, so the DDL service is not involved.
+    if (OB_FAIL(execute_ai_column_retry(ctx, stmt))) {
+    }
   } else if (stmt.is_alter_triggers()) {
     if (stmt.get_tg_arg().trigger_infos_.count() > 0) {
       stmt.get_tg_arg().ddl_stmt_str_ = first_stmt;

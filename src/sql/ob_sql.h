@@ -536,6 +536,12 @@ private:
                                 ObSchemaGetterGuard &schema_guard,
                                 ObSqlTraits &sql_traits);
   int get_reconstructed_batch_stmt(ObPlanCacheCtx &pc_ctx, ObString& stmt_sql);
+  // Rejects a statement that reads an AI column with unfinished results when
+  // the session asks for strict reads.
+  static int check_ai_column_strict_read(ObSQLSessionInfo &session,
+                                        ObStmt &stmt,
+                                        ObSqlCtx &context,
+                                        ObIAllocator &allocator);
   void rollback_implicit_trans_when_fail(ObResultSet &result, int &ret);
   friend class ::test::TestOptimizerUtils;
 

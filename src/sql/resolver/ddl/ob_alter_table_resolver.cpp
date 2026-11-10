@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "config_bridge.h"
 #include "sql/resolver/ddl/ob_alter_table_resolver.h"
+#include "sql/resolver/ddl/ob_ai_column_resolver.h"
 #include "sql/resolver/expr/ob_raw_expr_part_expr_checker.h"
 #include "sql/resolver/dml/ob_delete_resolver.h"
 #include "sql/resolver/ddl/ob_index_builder_util.h"
@@ -420,6 +421,27 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
         case T_CONVERT_TO_CHARACTER: {
           alter_table_stmt->set_convert_to_character();
           if (OB_FAIL(resolve_convert_to_character(*action_node))) {
+          }
+          break;
+        }
+        case T_AI_COLUMN_RETRY: {
+          // `RETRY AI COLUMN c [WHERE ...]` only recomputes a column of the
+          // rows that match the predicate. It is executed on its own, so it
+          // cannot be combined with a schema change of the same statement.
+          ParseNode *column_node = action_node->children_[0];
+          ParseNode *where_node = action_node->children_[1];
+          common::ObString column_name;
+          common::ObString predicate;
+          if (OB_ISNULL(column_node) || OB_ISNULL(column_node->str_value_)) {
+            ret = OB_ERR_UNEXPECTED;
+            SQL_RESV_LOG(WARN, "missing the column of a retry action", K(ret));
+          } else if (OB_FAIL(ob_write_string(*allocator_, ObString(column_node->str_len_,
+                                                                   column_node->str_value_),
+                                             column_name))) {
+          } else if (OB_FAIL(ObAiColumnResolver::build_retry_predicate(
+                         *allocator_, where_node, column_name, predicate))) {
+          } else {
+            alter_table_stmt->set_ai_column_retry(column_name, predicate);
           }
           break;
         }
@@ -837,6 +859,12 @@ int ObAlterTableResolver::resolve_column_options(const ParseNode &node,
           }
         }
       }
+    }
+    if (OB_SUCC(ret) && OB_NOT_NULL(alter_table_stmt)
+        && alter_table_stmt->has_ai_column_retry()
+        && alter_table_stmt->get_alter_table_action_count() > 1) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
     }
   }
   return ret;

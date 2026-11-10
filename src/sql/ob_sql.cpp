@@ -17,6 +17,11 @@
 #define USING_LOG_PREFIX SQL
 #include "config_bridge.h"
 #include "sql/ob_sql.h"
+#include "sql/resolver/dml/ob_dml_stmt.h"
+#include "sql/resolver/dml/ob_select_stmt.h"
+#include "sql/resolver/expr/ob_raw_expr.h"
+#include "share/schema/ob_table_schema.h"
+#include "oblib/common/mysqlclient/ob_mysql_proxy.h"
 #include "lib/json/ob_json_print_utils.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "query/runtime/ob_query_runtime_environment.h"
@@ -2019,6 +2024,155 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
   return ret;
 }
 
+namespace {
+
+// Appends the (table_id, column_id) of an AI column to the pair of lists,
+// skipping the ones already there.
+int add_ai_column_ref(const uint64_t table_id,
+                      const uint64_t column_id,
+                      common::ObIArray<uint64_t> &table_ids,
+                      common::ObIArray<uint64_t> &column_ids)
+{
+  int ret = OB_SUCCESS;
+  bool found = false;
+  for (int64_t i = 0; !found && i < table_ids.count(); ++i) {
+    found = (table_ids.at(i) == table_id && column_ids.at(i) == column_id);
+  }
+  if (!found) {
+    if (OB_FAIL(table_ids.push_back(table_id))) {
+    } else if (OB_FAIL(column_ids.push_back(column_id))) {
+    }
+  }
+  return ret;
+}
+
+// Collects the AI columns a statement exposes, including the columns of its
+// subqueries.
+int collect_ai_column_refs(share::schema::ObSchemaGetterGuard &schema_guard,
+                           ObDMLStmt &stmt,
+                           common::ObIArray<uint64_t> &table_ids,
+                           common::ObIArray<uint64_t> &column_ids)
+{
+  int ret = OB_SUCCESS;
+  common::ObIArray<ColumnItem> &items = stmt.get_column_items();
+  for (int64_t i = 0; OB_SUCC(ret) && i < items.count(); ++i) {
+    const ObColumnRefRawExpr *expr = items.at(i).get_expr();
+    if (OB_ISNULL(expr)) {
+      // a column of the statement that has no expression, nothing to check
+    } else {
+      const uint64_t table_id = expr->get_table_id();
+      const uint64_t column_id = expr->get_column_id();
+      const share::schema::ObTableSchema *table_schema = NULL;
+      if (OB_FAIL(schema_guard.get_table_schema(table_id, table_schema))) {
+      } else if (OB_ISNULL(table_schema)) {
+        // the table is gone, the statement fails later with its own error
+      } else if (OB_NOT_NULL(table_schema->get_ai_column_by_column_id(column_id))) {
+        if (OB_FAIL(add_ai_column_ref(table_id, column_id, table_ids, column_ids))) {
+        }
+      }
+    }
+  }
+  common::ObIArray<ObQueryRefRawExpr *> &subqueries = stmt.get_subquery_exprs();
+  for (int64_t i = 0; OB_SUCC(ret) && i < subqueries.count(); ++i) {
+    ObSelectStmt *sub_stmt = subqueries.at(i)->get_ref_stmt();
+    if (OB_NOT_NULL(sub_stmt)
+        && OB_FAIL(SMART_CALL(collect_ai_column_refs(schema_guard, *sub_stmt,
+                                                     table_ids, column_ids)))) {
+    }
+  }
+  return ret;
+}
+
+// Rejects the statement when the given AI column still has rows without a
+// result. A failed request leaves the column null as well, so a column that
+// ran out of retries is not readable in strict mode either.
+int check_one_ai_column(share::schema::ObSchemaGetterGuard &schema_guard,
+                        const uint64_t table_id,
+                        const uint64_t column_id)
+{
+  int ret = OB_SUCCESS;
+  const share::schema::ObTableSchema *table_schema = NULL;
+  const share::schema::ObDatabaseSchema *database_schema = NULL;
+  const share::schema::ObColumnSchemaV2 *column_schema = NULL;
+  char sql[1024];
+  if (OB_FAIL(schema_guard.get_table_schema(table_id, table_schema))) {
+  } else if (OB_ISNULL(table_schema)) {
+    // nothing to check
+  } else if (OB_FAIL(schema_guard.get_database_schema(table_schema->get_database_id(),
+                                                      database_schema))) {
+  } else if (OB_ISNULL(database_schema)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(column_schema = table_schema->get_column_schema(column_id))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    const int64_t written = snprintf(
+        sql, sizeof(sql), "select 1 from `%.*s`.`%.*s` where `%.*s` is null limit 1",
+        database_schema->get_database_name_str().length(),
+        database_schema->get_database_name_str().ptr(),
+        table_schema->get_table_name_str().length(),
+        table_schema->get_table_name_str().ptr(),
+        column_schema->get_column_name_str().length(),
+        column_schema->get_column_name_str().ptr());
+    if (OB_UNLIKELY(written <= 0 || written >= static_cast<int64_t>(sizeof(sql)))) {
+      ret = OB_SIZE_OVERFLOW;
+    } else {
+      SMART_VAR(common::ObMySQLProxy::MySQLResult, res) {
+        sqlclient::ObMySQLResult *result = NULL;
+        if (OB_ISNULL(GCTX.sql_proxy_)) {
+          ret = OB_NOT_INIT;
+        } else if (OB_FAIL(GCTX.sql_proxy_->read(res, sql))) {
+        } else if (OB_ISNULL(result = res.get_result())) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(result->next())) {
+          if (OB_ITER_END == ret) {
+            // every row of the column has a result
+            ret = OB_SUCCESS;
+          }
+        } else {
+          ret = OB_AI_COLUMN_NOT_READY;
+          LOG_USER_ERROR(OB_AI_COLUMN_NOT_READY,
+                         static_cast<unsigned long>(table_id),
+                         static_cast<unsigned long>(column_id));
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+} // namespace
+
+int ObSql::check_ai_column_strict_read(ObSQLSessionInfo &session,
+                                       ObStmt &stmt,
+                                       ObSqlCtx &context,
+                                       ObIAllocator &allocator)
+{
+  int ret = OB_SUCCESS;
+  bool strict = false;
+  UNUSED(allocator);
+  if (OB_FAIL(session.get_ai_column_strict_read(strict))) {
+  } else if (!strict) {
+    // a session that does not ask for strict reads sees the partial results
+  } else if (!ObStmt::is_dml_stmt(stmt.get_stmt_type())) {
+    // only a statement that reads a table can reach an AI column
+  } else if (OB_ISNULL(context.schema_guard_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    ObDMLStmt &dml_stmt = static_cast<ObDMLStmt &>(stmt);
+    common::ObSEArray<uint64_t, 16> table_ids;
+    common::ObSEArray<uint64_t, 16> column_ids;
+    if (OB_FAIL(collect_ai_column_refs(*context.schema_guard_, dml_stmt,
+                                       table_ids, column_ids))) {
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < table_ids.count(); ++i) {
+      if (OB_FAIL(check_one_ai_column(*context.schema_guard_, table_ids.at(i),
+                                      column_ids.at(i)))) {
+      }
+    }
+  }
+  return ret;
+}
+
 int ObSql::generate_stmt(ParseResult &parse_result,
                          ObPlanCacheCtx *pc_ctx,
                          ObSqlCtx &context,
@@ -2154,6 +2308,14 @@ int ObSql::generate_stmt(ParseResult &parse_result,
       context.all_local_session_vars_ = &(resolver_ctx.query_ctx_->all_local_session_vars_);
       context.cur_stmt_ = stmt;
       NG_TRACE(resolve_end);
+      // A strict session must not see a half computed AI column, so the check
+      // runs once the columns of the statement are known and before the
+      // statement touches any row.
+      if (OB_SUCC(ret) && OB_NOT_NULL(stmt)) {
+        if (OB_FAIL(check_ai_column_strict_read(result.get_session(), *stmt,
+                                                context, allocator))) {
+        }
+      }
       if (OB_SUCC(ret)) {
         if (NULL != pc_ctx && NULL != pc_ctx->exec_ctx_.get_physical_plan_ctx()) {
           if (OB_FAIL(pc_ctx->exec_ctx_.get_physical_plan_ctx()->init_datum_param_store())) {

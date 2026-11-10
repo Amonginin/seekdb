@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/resolver/ddl/ob_ai_column_resolver.h"
+#include <string.h>
 #include "lib/utility/utility.h"
 #include "sql/parser/parse_node.h"
 #include "share/ob_errno.h"
@@ -496,6 +497,153 @@ int ObAiColumnResolver::check_no_ai_dependency(common::ObIAllocator &allocator,
         }
       }
     }
+  }
+  return ret;
+}
+
+namespace {
+
+// The node that carries the name of a column reference.
+ParseNode *retry_column_name_node(ParseNode *node)
+{
+  ParseNode *name = NULL;
+  if (OB_NOT_NULL(node)) {
+    if (node->type_ == T_COLUMN_REF) {
+      name = node->num_child_ > 2 ? node->children_[node->num_child_ - 1] : NULL;
+    } else if (node->type_ == T_IDENT) {
+      name = node;
+    }
+  }
+  return name;
+}
+
+// True when the node is the bare word `status`. A quoted `status` names the
+// physical column of the table and must keep working that way.
+bool is_bare_status_ref(ParseNode *node)
+{
+  ParseNode *name = retry_column_name_node(node);
+  return OB_NOT_NULL(name)
+      && 0 == name->is_input_quoted_
+      && OB_NOT_NULL(name->str_value_)
+      && 6 == name->str_len_
+      && 0 == strncasecmp(name->str_value_, "status", 6);
+}
+
+// True when the node is the string literal of the given value.
+bool is_string_literal(ParseNode *node, const char *value)
+{
+  const int64_t len = static_cast<int64_t>(strlen(value));
+  return OB_NOT_NULL(node)
+      && node->type_ == T_VARCHAR
+      && OB_NOT_NULL(node->str_value_)
+      && len == node->str_len_
+      && 0 == strncasecmp(node->str_value_, value, static_cast<int32_t>(len));
+}
+
+int build_retry_node(common::ObIAllocator &allocator,
+                     ParseNode *node,
+                     const common::ObString &column_name,
+                     common::ObString &text);
+
+// Appends `<column>` to the rebuilt predicate.
+int append_target_column(common::ObIAllocator &allocator,
+                         const common::ObString &column_name,
+                         common::ObString &text)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(append_raw(allocator, text, "`", 1))) {
+  } else if (OB_FAIL(append_raw(allocator, text, column_name.ptr(),
+                                column_name.length()))) {
+  } else if (OB_FAIL(append_raw(allocator, text, "`", 1))) {
+  }
+  return ret;
+}
+
+int build_retry_binary(common::ObIAllocator &allocator,
+                       ParseNode *node,
+                       const common::ObString &column_name,
+                       const char *op,
+                       common::ObString &text)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(append_raw(allocator, text, "(", 1))) {
+  } else if (OB_FAIL(build_retry_node(allocator, node->children_[0], column_name, text))) {
+  } else if (OB_FAIL(append_raw(allocator, text, op, static_cast<int64_t>(strlen(op))))) {
+  } else if (OB_FAIL(build_retry_node(allocator, node->children_[1], column_name, text))) {
+  } else if (OB_FAIL(append_raw(allocator, text, ")", 1))) {
+  }
+  return ret;
+}
+
+int build_retry_node(common::ObIAllocator &allocator,
+                     ParseNode *node,
+                     const common::ObString &column_name,
+                     common::ObString &text)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(node)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (node->type_ == T_WHERE_CLAUSE) {
+    // children_[0] is the predicate, children_[1] is the hint of the clause.
+    ret = build_retry_node(allocator, node->children_[0], column_name, text);
+  } else if (node->type_ == T_OP_EQ) {
+    ParseNode *left = node->children_[0];
+    ParseNode *right = node->children_[1];
+    if (is_bare_status_ref(left)
+        && (is_string_literal(right, "READY") || is_string_literal(right, "FAILED"))) {
+      // The state of the target column is visible through its value: a row
+      // without a result is the one whose request failed or is still due.
+      const bool is_ready = is_string_literal(right, "READY");
+      const char *test = is_ready ? " is not null)" : " is null)";
+      if (OB_FAIL(append_raw(allocator, text, "(", 1))) {
+      } else if (OB_FAIL(append_target_column(allocator, column_name, text))) {
+      } else if (OB_FAIL(append_raw(allocator, text, test,
+                                    static_cast<int64_t>(strlen(test))))) {
+      }
+    } else {
+      ret = build_retry_binary(allocator, node, column_name, " = ", text);
+    }
+  } else if (node->type_ == T_OP_NE) {
+    ret = build_retry_binary(allocator, node, column_name, " != ", text);
+  } else if (node->type_ == T_OP_LT) {
+    ret = build_retry_binary(allocator, node, column_name, " < ", text);
+  } else if (node->type_ == T_OP_LE) {
+    ret = build_retry_binary(allocator, node, column_name, " <= ", text);
+  } else if (node->type_ == T_OP_GT) {
+    ret = build_retry_binary(allocator, node, column_name, " > ", text);
+  } else if (node->type_ == T_OP_GE) {
+    ret = build_retry_binary(allocator, node, column_name, " >= ", text);
+  } else if (node->type_ == T_OP_AND) {
+    ret = build_retry_binary(allocator, node, column_name, " and ", text);
+  } else if (node->type_ == T_OP_OR) {
+    ret = build_retry_binary(allocator, node, column_name, " or ", text);
+  } else if (node->type_ == T_OP_IN) {
+    ret = build_retry_binary(allocator, node, column_name, " in ", text);
+  } else {
+    // Values, column references and function calls are rebuilt the same way
+    // the stored expression is.
+    ret = build_node_text(allocator, node, text);
+  }
+  return ret;
+}
+
+} // namespace
+
+int ObAiColumnResolver::build_retry_predicate(common::ObIAllocator &allocator,
+                                              ParseNode *node,
+                                              const common::ObString &column_name,
+                                              common::ObString &text)
+{
+  int ret = OB_SUCCESS;
+  common::ObString rebuilt;
+  if (OB_ISNULL(node)) {
+    // No predicate selects every row of the table.
+    if (OB_FAIL(append_raw(allocator, rebuilt, "1 = 1", 5))) {
+    }
+  } else if (OB_FAIL(build_retry_node(allocator, node, column_name, rebuilt))) {
+  }
+  if (OB_SUCC(ret)) {
+    text = rebuilt;
   }
   return ret;
 }

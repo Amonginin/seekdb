@@ -228,6 +228,19 @@ bool ids_intersect(const ObString &left, const ObString &right)
   return found;
 }
 
+// True when the comma separated id list contains the given id.
+bool ids_contain(const ObString &text, const uint64_t id)
+{
+  ObSEArray<uint64_t, 16> ids;
+  bool found = false;
+  if (OB_SUCCESS == split_column_ids(text, ids)) {
+    for (int64_t i = 0; !found && i < ids.count(); ++i) {
+      found = (ids.at(i) == id);
+    }
+  }
+  return found;
+}
+
 // Reads the AI column definitions of the given tables. The metadata lives in
 // an inner table, so this needs a short nested session of its own.
 int load_ai_columns(ObTableModifyOp &op,
@@ -408,8 +421,11 @@ int write_task_rows(ObTableModifyOp &op,
         const AiColumnMeta &meta = metas.at(k);
         char action[3072];
         if (ObDmlEventType::DE_UPDATING == event && !pk_moved
-            && !ids_intersect(row.changed_column_ids_, meta.dep_column_ids_)) {
-          // Nothing the AI function reads has changed.
+            && !ids_intersect(row.changed_column_ids_, meta.dep_column_ids_)
+            && !ids_contain(row.changed_column_ids_, meta.column_id_)) {
+          // Nothing the AI function reads has changed, and the value of the
+          // column itself is untouched. Clearing the column is a request to
+          // compute it again, so that case falls through.
           continue;
         } else if (ObDmlEventType::DE_DELETING == event) {
           snprintf(action, sizeof(action),

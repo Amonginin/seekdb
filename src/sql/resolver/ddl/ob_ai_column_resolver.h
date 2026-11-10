@@ -101,6 +101,16 @@ public:
   static int check_no_ai_dependency(common::ObIAllocator &allocator,
                                      ParseNode *ai_expr,
                                      const common::ObIArray<common::ObString> &ai_column_names);
+
+  // Rebuilds the predicate of `ALTER TABLE ... RETRY AI COLUMN <column>
+  // [WHERE ...]` as SQL text. The bare identifier `status` is a pseudo column
+  // of the retry statement and stands for the state of the target column, so
+  // it is turned into a null test of that column. A quoted `status` keeps
+  // pointing at the physical column of the table.
+  static int build_retry_predicate(common::ObIAllocator &allocator,
+                                    ParseNode *node,
+                                    const common::ObString &column_name,
+                                    common::ObString &text);
 };
 
 } // namespace sql
