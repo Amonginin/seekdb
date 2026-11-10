@@ -426,25 +426,6 @@ int write_task_rows(ObTableModifyOp &op,
         if (OB_FAIL(ret)) {
         } else if (OB_FAIL(op.execute_write(action))) {
           ai_trace_impl("[ai] flush write failed ret=%d sql=%s\n", ret, action);
-        } else if (ObDmlEventType::DE_DELETING != event) {
-          // Mark the row with the request that is now responsible for it. The
-          // worker only publishes a result when the marker still matches, so a
-          // result that arrives after a newer request cannot win.
-          char req_sql[2048];
-          snprintf(req_sql, sizeof(req_sql),
-                   "update `%.*s`.`%.*s` set `__ai_req_%.*s` = '%s' where %.*s",
-                   row.database_name_.length(), row.database_name_.ptr(),
-                   row.table_name_.length(), row.table_name_.ptr(),
-                   meta.column_name_.length(), meta.column_name_.ptr(),
-                   request_id,
-                   row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr());
-          if (OB_FAIL(op.execute_write(req_sql))) {
-            // The hidden column cannot be addressed by a user statement, so the
-            // marker is best effort: the task row is already written and the
-            // worker protects itself by comparing the request ids.
-            ai_trace_impl("[ai] mark request skipped ret=%d sql=%s\n", ret, req_sql);
-            ret = OB_SUCCESS;
-          }
         }
       }
       if (OB_SUCC(ret)) {
