@@ -185,9 +185,9 @@ int build_rowkey_predicate(ObTableModifyOp &op,
 // Collects the ids of the columns whose value changed. An update that touches
 // nothing the AI function reads must not invalidate the column.
 //
-// With only_cleared the list holds the columns whose new value is null: that
-// is how a request to compute a column again is expressed, so publishing a
-// result does not count as one.
+// With only_cleared the list holds the columns the statement sets to null. The
+// value may already be null: asking for a column to be computed again must work
+// whatever the current value is, so no change is required.
 int collect_column_ids(ObTableModifyOp &op,
                        const ObDMLBaseCtDef &ctdef,
                        common::ObIAllocator &alloc,
@@ -209,10 +209,11 @@ int collect_column_ids(ObTableModifyOp &op,
       } else if (OB_FAIL(ctdef.new_row_.at(i)->eval(eval_ctx, new_datum))) {
       } else if (OB_NOT_NULL(old_datum) && OB_NOT_NULL(new_datum)) {
         changed = !ObDatum::binary_equal(*old_datum, *new_datum);
-        cleared = changed && new_datum->is_null();
+        cleared = new_datum->is_null();
       }
     }
-    if (OB_SUCC(ret) && changed && (!only_cleared || cleared)) {
+    const bool wanted = only_cleared ? cleared : changed;
+    if (OB_SUCC(ret) && wanted) {
       const int64_t written = snprintf(buf + pos, sizeof(buf) - pos, "%s%lu",
                                        first ? "" : ",",
                                        static_cast<unsigned long>(ctdef.column_ids_.at(i)));
