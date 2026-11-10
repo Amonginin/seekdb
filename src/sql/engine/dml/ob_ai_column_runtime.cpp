@@ -341,11 +341,15 @@ int write_task_rows(ObTableModifyOp &op,
   } else {
     static std::atomic<int64_t> task_seq(0);
     const int64_t seq = task_seq.fetch_add(1, std::memory_order_relaxed);
-    char request_id[64];
-    snprintf(request_id, sizeof(request_id), "%ld-%ld",
-             ObTimeUtility::current_time(), static_cast<long>(seq));
+    const int64_t stamp = ObTimeUtility::current_time();
     for (int64_t i = 0; OB_SUCC(ret) && i < pending.count(); ++i) {
       const ObAiPendingRow &row = pending.at(i);
+      // One request per row and per statement: the columns of the same row share
+      // it, while the rows of one statement must not collide on the primary key
+      // of the task table.
+      char request_id[64];
+      snprintf(request_id, sizeof(request_id), "%ld-%ld-%ld",
+               static_cast<long>(stamp), static_cast<long>(seq), static_cast<long>(i));
       const ObDmlEventType event = static_cast<ObDmlEventType>(row.dml_event_);
       const bool pk_moved = (0 != row.rowkey_predicate_.compare(row.old_rowkey_predicate_));
       for (int64_t k = 0; OB_SUCC(ret) && k < metas.count(); ++k) {
