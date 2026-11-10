@@ -6,6 +6,7 @@
 #   bash /tmp/seekdb/tools/comp_recover.sh deps     # 装依赖（rpmfile 解 rpm + rust）
 #   bash /tmp/seekdb/tools/comp_recover.sh build    # 编译 release
 #   bash /tmp/seekdb/tools/comp_recover.sh test     # 起 mock + 起库 + 跑 B1/B3 测例
+#   bash /tmp/seekdb/tools/comp_recover.sh save     # 实例到期前：把环境搬到 NAS
 #
 # 设计原则：
 #   1. 每个阶段可独立重复执行（幂等），失败可单段重跑
@@ -30,12 +31,12 @@ export PATH="${DEVTOOLS}/bin:${PATH}"
 stage_check() {
   log "体检"
 
-  info "--- NAS 备份（/mnt/workspace）---"
-  if [ -d /mnt/workspace ]; then
-    ls -lh /mnt/workspace/*.tgz 2>/dev/null || info "(没有 tgz 备份)"
-    df -h /mnt/workspace 2>/dev/null | tail -1
+  info "--- NAS 备份（${NAS_DIR}）---"
+  if [ -d "${NAS_DIR}" ]; then
+    ls -lh "${NAS_DIR}"/*.tgz 2>/dev/null || info "(没有 tgz 备份)"
+    df -h "${NAS_DIR}" 2>/dev/null | tail -1
   else
-    info "/mnt/workspace 不存在（不是魔搭 DSW？）"
+    info "${NAS_DIR} 不存在（不是魔搭 DSW？）"
   fi
 
   info "--- 本地盘 ---"
@@ -412,6 +413,260 @@ stage_case() {
   done
 }
 
+# ---------------------------------------------------------------- save
+# 实例到期前把可复用的东西搬到 NAS。NAS 上的文件不受实例回收影响。
+#
+# 代码是第一位：必须先推到 GitHub，NAS 备份只是兜底。顺序不能反。
+NAS_DIR="${NAS_DIR:-/mnt/workspace}"
+
+# 有 pigz 就用它，并行压缩快很多；没有就用 gzip。
+# 不走 tar -I：它和 -z 同时给会冲突。
+NCPU="$(nproc 2>/dev/null || echo 4)"
+[ "${NCPU}" -ge 1 ] 2>/dev/null || NCPU=4
+
+HAVE_PIGZ=0
+command -v pigz >/dev/null 2>&1 && HAVE_PIGZ=1
+HAVE_ZSTD=0
+command -v zstd >/dev/null 2>&1 && HAVE_ZSTD=1
+
+# 压缩方式。
+#   portable —— 产物是标准 gzip，任何机器的 gzip 都能解（pigz 的输出也是 gzip 格式）
+#   fast    —— 产物是 zstd，压缩率更高、NAS 写入更快，但解压端需要 zstd 命令
+PACK_MODE="${PACK_MODE:-portable}"
+
+# pack <输出基名> <tar 参数...>
+# 写出的文件路径放在全局 PACK_OUT 里，扩展名按实际用的压缩器定。
+PACK_OUT=""
+pack() {
+  local base="$1"; shift
+  local out tmpd
+  if [ "${PACK_MODE}" = "fast" ] && [ "${HAVE_ZSTD}" = "1" ]; then
+    out="${base}.tar.zst"
+    tar -cf - "$@" | zstd -T"${NCPU}" -3 -q -o "${out}" || return 1
+    PACK_OUT="${out}"
+    return 0
+  fi
+  out="${base}.tar.gz"
+  if [ "${HAVE_PIGZ}" = "1" ]; then
+    tar -cf - "$@" | pigz -6 > "${out}" || return 1
+  else
+    # 兜底：把 tar 流切成块，每块独立 gzip，再按序拼起来。
+    # gzip 的多个成员可以串联，标准 gzip -d 一次就能解开，所以产物
+    # 依然是普通 gzip 文件，解压端不需要装任何东西。
+    tmpd="$(mktemp -d /tmp/pack.XXXXXX)" || return 1
+    if ! tar -cf - "$@" | split -b 512M -a 3 - "${tmpd}/part-"; then
+      rm -rf "${tmpd}"; return 1
+    fi
+    if ! find "${tmpd}" -name 'part-*' ! -name '*.gz' -print0 \
+         | xargs -0 -P "${NCPU}" -I{} sh -c 'gzip -6 -c "$1" > "$1.gz"' _ {}; then
+      rm -rf "${tmpd}"; return 1
+    fi
+    # part-000 … part-063，名字定长，字典序就是分块顺序
+    if ! cat "${tmpd}"/part-*.gz > "${out}"; then
+      rm -rf "${tmpd}"; return 1
+    fi
+    rm -rf "${tmpd}"
+  fi
+  PACK_OUT="${out}"
+  return 0
+}
+
+# unpack <压缩包> <目标目录>
+unpack() {
+  local f="$1" dest="$2"
+  mkdir -p "${dest}"
+  case "${f}" in
+    *.tar.zst)
+      if [ "${HAVE_ZSTD}" != "1" ]; then
+        info "! 没有 zstd 命令，无法解开 ${f}"
+        return 1
+      fi
+      zstd -d -T"${NCPU}" -q -c "${f}" | tar -xf - -C "${dest}"
+      ;;
+    *.tar.gz)
+      if [ "${HAVE_PIGZ}" = "1" ]; then
+        pigz -dc "${f}" | tar -xf - -C "${dest}"
+      else
+        gzip -dc "${f}" | tar -xf - -C "${dest}"
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+stage_save() {
+  log "保存环境到 ${NAS_DIR}"
+
+  if [ ! -d "${NAS_DIR}" ]; then
+    die "${NAS_DIR} 不存在。这不是魔搭 DSW 实例，保存没有意义。"
+  fi
+  mkdir -p "${NAS_DIR}"
+
+  # 1) 代码。这是唯一真正不能丢的东西。
+  #    魔搭实例是 clone 公开 fork 来的，没有写凭据，推送多半会失败；
+  #    失败不致命——本地开发机上已经推过了，这里只是再确认一次。
+  if [ -d "${SRC_DIR}/.git" ]; then
+    ( cd "${SRC_DIR}" && git log --oneline -1 ) || true
+    info "推送 origin（公开 fork）"
+    ( cd "${SRC_DIR}" && git push origin HEAD:2026-competition ) > "${LOG_DIR}/push_origin.log" 2>&1
+    if [ $? -ne 0 ]; then
+      info "  origin 推送未成功（实例上可能没有写凭据），忽略"
+      tail -3 "${LOG_DIR}/push_origin.log" | sed 's/^/    /'
+    fi
+    info "推送 s2026（提测仓库）"
+    ( cd "${SRC_DIR}" && git push s2026 HEAD:2026-competition ) > "${LOG_DIR}/push_s2026.log" 2>&1
+    if [ $? -ne 0 ]; then
+      info "  s2026 推送未成功，忽略"
+      tail -3 "${LOG_DIR}/push_s2026.log" | sed 's/^/    /'
+    fi
+    # 记下这次保存对应哪个提交，新实例恢复时用它对账
+    {
+      echo "local=$( cd "${SRC_DIR}" && git rev-parse HEAD 2>/dev/null )"
+      echo "branch=2026-competition"
+      echo "saved_at=$(date -Is)"
+    } > "${NAS_DIR}/saved_commit.txt" 2>/dev/null
+    info "✓ 已记录提交到 ${NAS_DIR}/saved_commit.txt"
+  else
+    info "! ${SRC_DIR} 不是 git 仓库，跳过推送"
+  fi
+
+  # 2) 源码包（含 .git 历史）。排除编译产物和依赖，它们单独存。
+  info "打包源码（不含 build_release / deps）"
+  if [ -d "${SRC_DIR}" ]; then
+    pack "${NAS_DIR}/seekdb_src" \
+      -C /tmp --exclude='seekdb/build_release' --exclude='seekdb/deps/3rd' seekdb \
+      || die "源码打包失败"
+    info "✓ ${PACK_OUT}"
+  fi
+
+  # 3) 依赖（bison / clang / cmake / obclient）。省掉 10 分钟的 rpm 解包。
+  if [ -d "${SRC_DIR}/deps/3rd" ]; then
+    info "打包依赖 deps/3rd（耗时几分钟）"
+    pack "${NAS_DIR}/deps3rd" -C "${SRC_DIR}/deps" 3rd || die "依赖打包失败"
+    info "✓ ${PACK_OUT}"
+  fi
+
+  # 4) Rust 工具链。5 个 target 重新下载很慢。
+  if [ -d "$HOME/.cargo" ]; then
+    info "打包 Rust 工具链"
+    pack "${NAS_DIR}/cargo" -C "$HOME" .cargo || die "Rust 打包失败"
+    info "✓ ${PACK_OUT}"
+  fi
+
+  # 5) 测试日志。判题失败时的现场证据，比二进制更难重造。
+  if [ -d /tmp/recover ]; then
+    pack "${NAS_DIR}/recover_logs" -C /tmp recover && info "✓ ${PACK_OUT}"
+  fi
+
+  info "--- NAS 上的备份 ---"
+  ls -lh "${NAS_DIR}"/*.tar.* "${NAS_DIR}"/*.txt 2>/dev/null
+  df -h "${NAS_DIR}" | tail -1
+  info "✓ 保存完成。新实例上执行：bash tools/comp_recover.sh restore"
+}
+
+# 完整编译树很大（十几 GB），压缩要十几分钟，放后台跑。
+# 留着它才能在新实例上做增量编译，否则每次都要全量重编。
+stage_save_full() {
+  log "保存完整编译树（增量编译用）"
+  if [ ! -d "${NAS_DIR}" ]; then
+    die "${NAS_DIR} 不存在"
+  fi
+  if [ ! -d "${SRC_DIR}/build_release" ]; then
+    die "${SRC_DIR}/build_release 不存在，先编译"
+  fi
+  local out="${NAS_DIR}/build_release.tgz"
+  info "后台打包 ${SRC_DIR}/build_release → ${out}"
+  info "预计十几分钟。用 tail -f ${LOG_DIR}/save_full.log 跟踪"
+  # 后台子 shell 里用不到 pack 函数，这里直接用 tar 自带的 gzip。
+  nohup bash -c "tar -C '${SRC_DIR}' -czf '${out}.part' build_release \
+    && mv '${out}.part' '${out}' && echo DONE > '${out}.done'" \
+    > "${LOG_DIR}/save_full.log" 2>&1 &
+  info "✓ 后台任务 pid=$!"
+}
+
+# ---------------------------------------------------------------- restore
+# 找一个备份包。名字有新旧两套：
+#   旧：<base>.tgz        新：<base>.tar.gz / <base>.tar.zst
+# 新名字优先，因为旧的可能是上一次用单线程 gzip 存的。
+find_backup() {
+  local base="$1"
+  local f
+  for f in "${NAS_DIR}/${base}.tar.zst" "${NAS_DIR}/${base}.tar.gz" "${NAS_DIR}/${base}.tgz"; do
+    if [ -f "${f}" ]; then
+      printf '%s' "${f}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+stage_restore() {
+  log "从 NAS 恢复环境"
+
+  if [ ! -d "${NAS_DIR}" ]; then
+    die "${NAS_DIR} 不存在"
+  fi
+
+  # 1) 源码。NAS 有包就解包，没有就 clone。
+  local src_pkg
+  if src_pkg=$(find_backup seekdb_src); then
+    info "解包源码：${src_pkg}"
+    [ -d "${SRC_DIR}" ] && mv "${SRC_DIR}" "${SRC_DIR}.old.$(date +%s)"
+    unpack "${src_pkg}" /tmp || die "源码解包失败"
+    info "✓ 源码已恢复"
+  else
+    info "没有源码包，改用 clone"
+    git clone -b 2026-competition \
+      https://gh-proxy.com/https://github.com/Amonginin/seekdb.git "${SRC_DIR}" \
+      || die "clone 失败"
+  fi
+
+  # 2) 依赖。
+  local deps_pkg
+  if deps_pkg=$(find_backup deps3rd); then
+    info "解包依赖：${deps_pkg}"
+    mkdir -p "${SRC_DIR}/deps"
+    unpack "${deps_pkg}" "${SRC_DIR}/deps" || die "依赖解包失败"
+    # dep_create.sh 会 rm -rf deps/3rd 再重下，标记能让它提前退出
+    local dep_md5
+    dep_md5=$(md5sum "${SRC_DIR}/deps/init/oceanbase.el9.x86_64.deps" | cut -d' ' -f1)
+    touch "${SRC_DIR}/deps/3rd/DONE" "${SRC_DIR}/deps/3rd/${dep_md5}"
+    info "✓ 依赖已恢复（已打 DONE 标记）"
+  else
+    info "! 没有依赖包，需要跑：bash $0 deps"
+  fi
+
+  # 3) Rust。
+  local cargo_pkg
+  if cargo_pkg=$(find_backup cargo); then
+    info "解包 Rust 工具链：${cargo_pkg}"
+    unpack "${cargo_pkg}" "$HOME" || info "  Rust 解包失败，重装即可"
+    [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+    export PATH="$HOME/.cargo/bin:${PATH}"
+    info "✓ Rust 已恢复"
+  fi
+
+  # 4) 完整编译树（可选，能把重编从 60 分钟压到 10 分钟）。
+  local tree_pkg
+  if tree_pkg=$(find_backup build_release); then
+    info "解包编译树（几分钟）：${tree_pkg}"
+    unpack "${tree_pkg}" "${SRC_DIR}" || info "  解包失败，可重编"
+    info "✓ 编译树已恢复"
+  elif [ -f "${NAS_DIR}/build_release.tgz.part" ]; then
+    info "! build_release.tgz.part 存在但没有完整的包，说明上次没存完，忽略"
+  fi
+
+  # 5) 对账：这次恢复出来的代码是哪个提交。
+  if [ -f "${NAS_DIR}/saved_commit.txt" ]; then
+    info "保存时记录的提交："
+    sed 's/^/  /' "${NAS_DIR}/saved_commit.txt"
+    ( cd "${SRC_DIR}" && git log --oneline -1 | sed 's/^/  当前 /' )
+  fi
+
+  info "--- 体检 ---"
+  stage_check
+}
+
 run_case() {
   local suite="$1" case_name="$2"
   local dir="${SRC_DIR}/tools/deploy/mysql_test/test_suite/${suite}"
@@ -460,6 +715,9 @@ case "${STAGE}" in
   build) stage_build ;;
   test)  stage_test ;;
   case)  stage_case "$@" ;;
+  save)  stage_save ;;
+  save_full) stage_save_full ;;
+  restore) stage_restore ;;
   all)   stage_deps; stage_build; stage_test ;;
-  *)     echo "用法: bash $0 {check|deps|build|test|all}"; echo "      bash $0 case <套件/用例> [更多...]"; exit 1 ;;
+  *)     echo "用法: bash $0 {check|deps|build|test|save|save_full|restore|all}"; echo "      bash $0 case <套件/用例> [更多...]"; exit 1 ;;
 esac
