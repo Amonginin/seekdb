@@ -845,12 +845,17 @@ int ob_file_parse_csv(const char *buf,
     }
     if (OB_SUCC(ret) && OB_FAIL(data.finish_columns())) {
     }
-    for (int64_t idx = data_start_index; OB_SUCC(ret) && idx < raw_cells.count(); ++idx) {
-      const CsvRawCell &cell = raw_cells.at(idx);
-      if (OB_FAIL(data.add_cell(cell.ptr_, cell.len_, cell.is_null_))) {
+    // 逐行灌数据：每行结束后必须调 end_row，否则待定单元格数会累加成 行数×列数
+    int64_t cell_index = data_start_index;
+    for (int64_t row = (has_header ? 1 : 0); OB_SUCC(ret) && row < row_ends.count(); ++row) {
+      const int64_t row_end = row_ends.at(row);
+      for (; OB_SUCC(ret) && cell_index < row_end; ++cell_index) {
+        const CsvRawCell &cell = raw_cells.at(cell_index);
+        if (OB_FAIL(data.add_cell(cell.ptr_, cell.len_, cell.is_null_))) {
+        }
       }
-    }
-    if (OB_SUCC(ret) && OB_FAIL(data.end_row())) {
+      if (OB_SUCC(ret) && OB_FAIL(data.end_row())) {
+      }
     }
     if (OB_SUCC(ret) && OB_FAIL(data.infer_types())) {
     }
