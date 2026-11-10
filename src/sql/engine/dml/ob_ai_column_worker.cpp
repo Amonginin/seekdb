@@ -379,6 +379,7 @@ bool is_stale_request(const uint64_t table_id,
                       const ObString &rowkey_predicate,
                       const ObString &request_id)
 {
+  int ret = OB_SUCCESS;
   bool stale = false;
   char sql[1024];
   snprintf(sql, sizeof(sql),
