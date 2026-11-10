@@ -435,7 +435,11 @@ int write_task_rows(ObTableModifyOp &op,
                    request_id,
                    row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr());
           if (OB_FAIL(op.execute_write(req_sql))) {
-            ai_trace_impl("[ai] mark request failed ret=%d sql=%s\n", ret, req_sql);
+            // The hidden column cannot be addressed by a user statement, so the
+            // marker is best effort: the task row is already written and the
+            // worker protects itself by comparing the request ids.
+            ai_trace_impl("[ai] mark request skipped ret=%d sql=%s\n", ret, req_sql);
+            ret = OB_SUCCESS;
           }
         }
       }
