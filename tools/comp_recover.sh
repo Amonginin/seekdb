@@ -242,9 +242,16 @@ stage_build() {
   log "阶段 2/3：编译（release）"
   cd "${SRC_DIR}" || die "找不到 ${SRC_DIR}"
 
-  # 拉最新代码（含新增文件；不动分支历史）
+  # 拉最新代码。deps/ 是解包出来的依赖，不能跟着覆盖掉。
+  # 用 merge --ff-only 而不是 reset --hard：只有能快进时才移动 HEAD，
+  # 本地有未提交改动时它会拒绝而不是把改动丢掉。
   git fetch origin 2026-competition 2>&1 | tail -2
-  git checkout FETCH_HEAD -- src/ tools/ deps/ 2>/dev/null || true
+  if ! git merge --ff-only FETCH_HEAD; then
+    die "无法快进到远端提交。本地有分叉或未提交改动，先处理再编译：
+  git status                     # 看是什么挡住了
+  git stash                      # 或先存起来
+  git merge --ff-only FETCH_HEAD"
+  fi
   git log --oneline -1
 
   pkill -f "seekdb --base-dir" 2>/dev/null; sleep 2
@@ -483,7 +490,8 @@ unpack() {
       fi
       zstd -d -T"${NCPU}" -q -c "${f}" | tar -xf - -C "${dest}"
       ;;
-    *.tar.gz)
+    *.tar.gz|*.tgz)
+      # .tgz 是旧脚本存的名字，格式和 .tar.gz 完全一样
       if [ "${HAVE_PIGZ}" = "1" ]; then
         pigz -dc "${f}" | tar -xf - -C "${dest}"
       else
@@ -567,9 +575,11 @@ stage_save_full() {
 }
 
 # ---------------------------------------------------------------- restore
-# 找一个备份包。名字有新旧两套：
-#   旧：<base>.tgz        新：<base>.tar.gz / <base>.tar.zst
-# 新名字优先，因为旧的可能是上一次用单线程 gzip 存的。
+# 找一个备份包。名字有新旧几套：
+#   新：<base>.tar.zst / <base>.tar.gz
+#   旧：<base>.tgz
+#   更旧：<base>_YYYYMMDD.tgz（带日期后缀）
+# 新名字优先；同名多份时取最新的那个。
 find_backup() {
   local base="$1"
   local f
@@ -579,6 +589,13 @@ find_backup() {
       return 0
     fi
   done
+  # 带日期后缀的旧包：<base>_20261109.tgz，取 mtime 最新的一个
+  local newest
+  newest=$(ls -1t "${NAS_DIR}/${base}"_*.tgz "${NAS_DIR}/${base}"_*.tar.gz 2>/dev/null | head -1)
+  if [ -n "${newest}" ] && [ -f "${newest}" ]; then
+    printf '%s' "${newest}"
+    return 0
+  fi
   return 1
 }
 
@@ -597,7 +614,8 @@ stage_restore() {
     unpack "${src_pkg}" /tmp || die "源码解包失败"
     info "✓ 源码已恢复"
   else
-    info "没有源码包，改用 clone"
+    # 2026-11-09 实例到期时源码包没打成，就是走的这条路。
+    info "没有源码包，改用 clone（代码在 GitHub 上，不会丢）"
     git clone -b 2026-competition \
       https://gh-proxy.com/https://github.com/Amonginin/seekdb.git "${SRC_DIR}" \
       || die "clone 失败"
@@ -618,7 +636,7 @@ stage_restore() {
     info "! 没有依赖包，需要跑：bash $0 deps"
   fi
 
-  # 3) Rust。
+  # 3) Rust。~/.cargo 不在 NAS 上，只有我们自己存过才有；否则必须重装。
   local cargo_pkg
   if cargo_pkg=$(find_backup cargo); then
     info "解包 Rust 工具链：${cargo_pkg}"
@@ -626,6 +644,8 @@ stage_restore() {
     [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
     export PATH="$HOME/.cargo/bin:${PATH}"
     info "✓ Rust 已恢复"
+  else
+    info "! 没有 Rust 包，跑：bash $0 deps（会装 Rust 1.98.1）"
   fi
 
   # 4) 完整编译树（可选，能把重编从 60 分钟压到 10 分钟）。
