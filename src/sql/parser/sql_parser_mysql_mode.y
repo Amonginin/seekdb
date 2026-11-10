@@ -17662,13 +17662,11 @@ NAME_OB
 | NAME_OB COMP_EQ NAME_OB
 {
   (void) $1;
-  (void) $2;
   $$ = $3;
 }
 | NAME_OB COMP_EQ STRING_VALUE
 {
   (void) $1;
-  (void) $2;
   $$ = $3;
 }
 | FORMAT NAME_OB
@@ -17684,13 +17682,11 @@ NAME_OB
 | FORMAT COMP_EQ NAME_OB
 {
   (void) $1;
-  (void) $2;
   $$ = $3;
 }
 | FORMAT COMP_EQ STRING_VALUE
 {
   (void) $1;
-  (void) $2;
   $$ = $3;
 }
 ;
@@ -17708,7 +17704,6 @@ copy_option_list:
 | copy_option_list ',' copy_option
 {
   (void) $1;
-  (void) $2;
   (void) $3;
   $$ = NULL;
 }
