@@ -83,8 +83,7 @@ int get_option_int(const ParseNode *value, int64_t &out)
   if (OB_FAIL(ret)) {
   } else if (NULL == real_value) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (T_INT == real_value->type_ || T_BOOL == real_value->type_
-             || T_NUM == real_value->type_) {
+  } else if (T_INT == real_value->type_ || T_BOOL == real_value->type_) {
     out = real_value->value_;
   } else if (NULL != real_value->str_value_) {
     out = strtoll(real_value->str_value_, NULL, 10);

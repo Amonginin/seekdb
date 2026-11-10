@@ -25,6 +25,7 @@
 #include <dirent.h>
 
 #include "lib/ob_errno.h"
+#include "lib/utility/alloc_assist.h"
 #include "lib/utility/ob_print_utils.h"
 
 namespace oceanbase
