@@ -17591,6 +17591,7 @@ NAME_OB
 }
 | NAME_OB opt_equal_mark file_table_option_value
 {
+  (void) $2;
   malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, $1, $3);
 }
 ;
@@ -17611,7 +17612,7 @@ file_table_option_list:
 ;
 
 file_table_expr:
-file_table_func '(' STRING_VALUE file_table_option_list ')'
+file_table_func '(' STRING_VALUE file_table_option_list ')' %prec LOWER_PARENS
 {
   ParseNode *alias_node = NULL;
   make_name_node(alias_node, result->malloc_pool_, "");
@@ -17632,11 +17633,11 @@ file_table_func '(' STRING_VALUE file_table_option_list ')'
 
 // describe select ...：输出 DuckDB 形状的 6 列
 describe_select_stmt:
-DESCRIBE select_stmt
+DESCRIBE select_no_parens
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_DESCRIBE_SELECT, 1, $2);
 }
-| DESC select_stmt
+| DESC select_no_parens
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_DESCRIBE_SELECT, 1, $2);
 }
@@ -17650,34 +17651,46 @@ NAME_OB
 }
 | NAME_OB NAME_OB
 {
+  (void) $1;
   $$ = $2;
 }
 | NAME_OB STRING_VALUE
 {
+  (void) $1;
   $$ = $2;
 }
 | NAME_OB COMP_EQ NAME_OB
 {
+  (void) $1;
+  (void) $2;
   $$ = $3;
 }
 | NAME_OB COMP_EQ STRING_VALUE
 {
+  (void) $1;
+  (void) $2;
   $$ = $3;
 }
 | FORMAT NAME_OB
 {
+  (void) $1;
   $$ = $2;
 }
 | FORMAT STRING_VALUE
 {
+  (void) $1;
   $$ = $2;
 }
 | FORMAT COMP_EQ NAME_OB
 {
+  (void) $1;
+  (void) $2;
   $$ = $3;
 }
 | FORMAT COMP_EQ STRING_VALUE
 {
+  (void) $1;
+  (void) $2;
   $$ = $3;
 }
 ;
@@ -17689,10 +17702,14 @@ copy_option_list:
 }
 | copy_option
 {
+  (void) $1;
   $$ = NULL;
 }
 | copy_option_list ',' copy_option
 {
+  (void) $1;
+  (void) $2;
+  (void) $3;
   $$ = NULL;
 }
 ;
