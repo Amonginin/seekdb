@@ -622,6 +622,13 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
     if (OB_FAIL(ret)) {
     } else if (OB_FAIL(check_skip_index(alter_table_stmt->get_alter_table_arg().alter_table_schema_))) {
     }
+    if (OB_SUCC(ret) && alter_table_stmt->has_ai_column_retry()
+        && alter_table_stmt->get_alter_table_action_count() > 1) {
+      // The retry recomputes a column on its own and cannot share the
+      // statement with a schema change.
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
+    }
     //deal with drop column affer drop constraint (mysql mode)
     if (OB_SUCC(ret) && drop_col_act_position_list.count() > 0) {
       for (uint64_t i = 0; OB_SUCC(ret) && i < drop_col_act_position_list.count(); ++i) {
@@ -859,12 +866,6 @@ int ObAlterTableResolver::resolve_column_options(const ParseNode &node,
           }
         }
       }
-    }
-    if (OB_SUCC(ret) && OB_NOT_NULL(alter_table_stmt)
-        && alter_table_stmt->has_ai_column_retry()
-        && alter_table_stmt->get_alter_table_action_count() > 1) {
-      ret = OB_NOT_SUPPORTED;
-      LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
     }
   }
   return ret;
