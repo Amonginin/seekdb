@@ -575,23 +575,18 @@ stage_save_full() {
 }
 
 # ---------------------------------------------------------------- restore
-# 找一个备份包。名字有新旧几套：
-#   新：<base>.tar.zst / <base>.tar.gz
-#   旧：<base>.tgz
-#   更旧：<base>_YYYYMMDD.tgz（带日期后缀）
-# 新名字优先；同名多份时取最新的那个。
+# 找一个备份包。NAS 上同时存在多代命名：
+#   <base>.tar.zst / <base>.tar.gz    新格式
+#   <base>.tgz                       旧格式
+#   <base>_YYYYMMDD.tgz              带日期后缀的旧格式
+# 取 mtime 最新的那个，不按名字偏好——日期后缀的那份往往更新。
 find_backup() {
   local base="$1"
-  local f
-  for f in "${NAS_DIR}/${base}.tar.zst" "${NAS_DIR}/${base}.tar.gz" "${NAS_DIR}/${base}.tgz"; do
-    if [ -f "${f}" ]; then
-      printf '%s' "${f}"
-      return 0
-    fi
-  done
-  # 带日期后缀的旧包：<base>_20261109.tgz，取 mtime 最新的一个
   local newest
-  newest=$(ls -1t "${NAS_DIR}/${base}"_*.tgz "${NAS_DIR}/${base}"_*.tar.gz 2>/dev/null | head -1)
+  newest=$(ls -1t "${NAS_DIR}/${base}.tar.zst" "${NAS_DIR}/${base}.tar.gz" \
+                   "${NAS_DIR}/${base}.tgz" "${NAS_DIR}/${base}"_*.tgz \
+                   "${NAS_DIR}/${base}"_*.tar.gz "${NAS_DIR}/${base}"_*.tar.zst \
+                   2>/dev/null | head -1)
   if [ -n "${newest}" ] && [ -f "${newest}" ]; then
     printf '%s' "${newest}"
     return 0
@@ -606,9 +601,16 @@ stage_restore() {
     die "${NAS_DIR} 不存在"
   fi
 
-  # 1) 源码。NAS 有包就解包，没有就 clone。
+  # 1) 源码。已经 clone 过了就保留工作区那份（NAS 里的源码包可能是旧提交，
+  #    而 clone 的一定是 GitHub 上的最新提交），只把分支快进到远端。
   local src_pkg
-  if src_pkg=$(find_backup seekdb_src); then
+  if [ -d "${SRC_DIR}/.git" ]; then
+    info "源码已存在（${SRC_DIR}），快进到远端最新"
+    ( cd "${SRC_DIR}" && git fetch origin 2026-competition 2>&1 | tail -1 )
+    ( cd "${SRC_DIR}" && git merge --ff-only FETCH_HEAD 2>/dev/null ) \
+      || info "  不能快进（本地有改动），保持现状"
+    ( cd "${SRC_DIR}" && git log --oneline -1 | sed 's/^/  /' )
+  elif src_pkg=$(find_backup seekdb_src); then
     info "解包源码：${src_pkg}"
     [ -d "${SRC_DIR}" ] && mv "${SRC_DIR}" "${SRC_DIR}.old.$(date +%s)"
     unpack "${src_pkg}" /tmp || die "源码解包失败"
@@ -649,11 +651,24 @@ stage_restore() {
   fi
 
   # 4) 完整编译树（可选，能把重编从 60 分钟压到 10 分钟）。
+  #    注意：编译树里的绝对路径是 /tmp/seekdb，换目录解包增量就失效。
   local tree_pkg
   if tree_pkg=$(find_backup build_release); then
     info "解包编译树（几分钟）：${tree_pkg}"
-    unpack "${tree_pkg}" "${SRC_DIR}" || info "  解包失败，可重编"
-    info "✓ 编译树已恢复"
+    if unpack "${tree_pkg}" "${SRC_DIR}"; then
+      info "✓ 编译树已恢复"
+      # 编译树比当前代码旧是正常的，但 CMake 缓存里的路径必须对得上，
+      # 否则会当成全新工程重编。检查一下缓存里的路径。
+      if [ -f "${SRC_DIR}/build_release/CMakeCache.txt" ]; then
+        if grep -q "${SRC_DIR}" "${SRC_DIR}/build_release/CMakeCache.txt" 2>/dev/null; then
+          info "  ✓ CMake 缓存路径匹配，增量编译可用"
+        else
+          info "  ! CMake 缓存里的路径不是 ${SRC_DIR}，可能变全量编译"
+        fi
+      fi
+    else
+      info "  解包失败，可重编"
+    fi
   elif [ -f "${NAS_DIR}/build_release.tgz.part" ]; then
     info "! build_release.tgz.part 存在但没有完整的包，说明上次没存完，忽略"
   fi
