@@ -355,8 +355,16 @@ start_instance() {
 
   # 全新 bootstrap 的实例没有 test 库，而 mysqltest 用 --database=test 连接，
   # 缺库会让每个用例都直接在建立连接时失败。
-  local mysql_cli="${SRC_DIR}/deps/3rd/u01/obclient/bin/mysql"
-  if [ -x "${mysql_cli}" ]; then
+  local mysql_cli=""
+  local c
+  for c in "${SRC_DIR}/deps/3rd/u01/obclient/bin/obclient" \
+           "${SRC_DIR}/deps/3rd/u01/obclient/bin/mysql"; do
+    if [ -x "${c}" ]; then
+      mysql_cli="${c}"
+      break
+    fi
+  done
+  if [ -n "${mysql_cli}" ]; then
     export LD_LIBRARY_PATH="${SRC_DIR}/deps/3rd/u01/obclient/lib:${LD_LIBRARY_PATH:-}"
     if "${mysql_cli}" -h127.0.0.1 -P2881 -uroot --protocol=tcp \
          -e "create database if not exists test;" >/dev/null 2>&1; then
@@ -364,9 +372,58 @@ start_instance() {
     else
       info "! 建 test 库失败，继续尝试"
     fi
+    # 官方用例里写死了 connect ...,admin,$OBMYSQL_PWD,...（如 file_sql 的两个
+    # include），而 bootstrap 只建了 root。这里补一个空密码的 admin。
+    if ! "${mysql_cli}" -h127.0.0.1 -P2881 -uroot --protocol=tcp \
+           -e "create user admin identified by '';" >/dev/null 2>&1; then
+      # 已存在但密码未知时，改一次空密码
+      "${mysql_cli}" -h127.0.0.1 -P2881 -uroot --protocol=tcp \
+        -e "alter user admin identified by '';" >/dev/null 2>&1
+    fi
+    if "${mysql_cli}" -h127.0.0.1 -P2881 -uroot --protocol=tcp \
+         -e "grant all privileges on *.* to admin with grant option;" >/dev/null 2>&1; then
+      info "✓ admin 用户可用（空密码，已授权）"
+    else
+      info "! 授权 admin 失败"
+    fi
   else
-    info "! 未找到 mysql 客户端，跳过建 test 库"
+    info "! 未找到 obclient/mysql 客户端，跳过建库与 admin 用户"
   fi
+}
+
+# 官方用例（如 file_sql 的两个 include）用 ssh/scp 把数据摆到「本机」：
+#   ssh $FILE_SQL_HOST 'cmd' 与 scp data/* $FILE_SQL_HOST:dir
+# 容器里通常没有 sshd，这里放两个只在本机执行的 shim 到 PATH 最前面，
+# 不修改任何 test_suite 文件，语义等同在同一台机器上拷贝。
+install_local_ssh_shims() {
+  local d="${LOG_DIR}/shim"
+  mkdir -p "${d}"
+  cat > "${d}/ssh" <<'SH'
+#!/usr/bin/env bash
+# 忽略 host 参数，直接在本地执行剩余命令
+shift || true
+exec bash -c "$*"
+SH
+  cat > "${d}/scp" <<'SH'
+#!/usr/bin/env bash
+# 把 <host>:<path> 还原成本地路径，其余按普通 cp 处理
+srcs=()
+dest=""
+for a in "$@"; do
+  case "$a" in
+    -*) ;;
+    *:*) dest="${a#*:}" ;;
+    *) srcs+=("$a") ;;
+  esac
+done
+if [ -z "${dest}" ] || [ ${#srcs[@]} -eq 0 ]; then
+  exit 1
+fi
+cp -f "${srcs[@]}" "${dest}/"
+SH
+  chmod +x "${d}/ssh" "${d}/scp"
+  export PATH="${d}:${PATH}"
+  info "✓ 已启用本地 ssh/scp shim（${d}）"
 }
 
 stage_test() {
@@ -375,6 +432,7 @@ stage_test() {
   kill_mocks
   # 工作目录必须是 tools/deploy：测例里的 --exec 写的是 mysql_test/test_suite/...
   cd "${SRC_DIR}/tools/deploy" || die "找不到 tools/deploy"
+  install_local_ssh_shims
   python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py start 19120 > "${LOG_DIR}/mock.log" 2>&1
   python3 mysql_test/test_suite/ai_function/include/ai_function_mock.py start 8000 >> "${LOG_DIR}/mock.log" 2>&1
   sleep 2
@@ -405,6 +463,7 @@ stage_case() {
 
   kill_mocks
   cd "${SRC_DIR}/tools/deploy" || die "找不到 tools/deploy"
+  install_local_ssh_shims
 
   for spec in "$@"; do
     local suite="${spec%%/*}"
