@@ -348,6 +348,27 @@ int load_ai_columns(ObTableModifyOp &op,
   return ret;
 }
 
+// Clears the value of an AI column. A reader must not mistake the result of
+// the previous request for the result of the new one, so the column goes back
+// to null in the same transaction that creates the task.
+int invalidate_ai_column(ObTableModifyOp &op,
+                         const ObAiPendingRow &row,
+                         const AiColumnMeta &meta)
+{
+  int ret = OB_SUCCESS;
+  char sql[1024];
+  snprintf(sql, sizeof(sql),
+           "update `%.*s`.`%.*s` set `%.*s` = null where %.*s",
+           row.database_name_.length(), row.database_name_.ptr(),
+           row.table_name_.length(), row.table_name_.ptr(),
+           meta.column_name_.length(), meta.column_name_.ptr(),
+           row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr());
+  if (OB_FAIL(op.execute_write(sql))) {
+    ai_trace_impl("[ai] invalidate failed ret=%d sql=%s\n", ret, sql);
+  }
+  return ret;
+}
+
 // Writes the task rows of all recorded rows in one nested session, so they
 // join the transaction of the statement.
 int write_task_rows(ObTableModifyOp &op,
@@ -381,11 +402,12 @@ int write_task_rows(ObTableModifyOp &op,
       snprintf(request_id, sizeof(request_id), "%ld-%ld-%ld",
                static_cast<long>(stamp), static_cast<long>(seq), static_cast<long>(i));
       const ObDmlEventType event = static_cast<ObDmlEventType>(row.dml_event_);
-      const bool pk_moved = (0 != row.rowkey_predicate_.compare(row.old_rowkey_predicate_));
+      const bool pk_moved = (ObDmlEventType::DE_UPDATING == event
+                             && 0 != row.rowkey_predicate_.compare(row.old_rowkey_predicate_));
       for (int64_t k = 0; OB_SUCC(ret) && k < metas.count(); ++k) {
         const AiColumnMeta &meta = metas.at(k);
         char action[3072];
-        if (ObDmlEventType::DE_UPDATING == event
+        if (ObDmlEventType::DE_UPDATING == event && !pk_moved
             && !ids_intersect(row.changed_column_ids_, meta.dep_column_ids_)) {
           // Nothing the AI function reads has changed.
           continue;
@@ -395,7 +417,9 @@ int write_task_rows(ObTableModifyOp &op,
                    AI_TASK_TABLE_NAME,
                    static_cast<unsigned long>(row.table_id_),
                    row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr());
-        } else if (ObDmlEventType::DE_UPDATING == event && pk_moved) {
+        } else if (pk_moved) {
+          // The row moved to another primary key. The task of the old row is
+          // gone, and the value of the AI column belongs to the old row.
           char drop_sql[1024];
           snprintf(drop_sql, sizeof(drop_sql),
                    "delete from %s where table_id = %lu and rowkey_predicate = '%.*s'",
@@ -403,6 +427,8 @@ int write_task_rows(ObTableModifyOp &op,
                    static_cast<unsigned long>(row.table_id_),
                    row.old_rowkey_predicate_.length(), row.old_rowkey_predicate_.ptr());
           if (OB_FAIL(op.execute_write(drop_sql))) {
+          }
+          if (OB_SUCC(ret) && OB_FAIL(invalidate_ai_column(op, row, meta))) {
           }
           if (OB_SUCC(ret)) {
             snprintf(action, sizeof(action),
@@ -428,6 +454,8 @@ int write_task_rows(ObTableModifyOp &op,
                    row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr(),
                    static_cast<unsigned long>(meta.column_id_));
           if (OB_FAIL(op.execute_write(drop_sql))) {
+          }
+          if (OB_SUCC(ret) && OB_FAIL(invalidate_ai_column(op, row, meta))) {
           }
           if (OB_SUCC(ret)) {
             snprintf(action, sizeof(action),
