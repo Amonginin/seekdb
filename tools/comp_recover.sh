@@ -426,9 +426,15 @@ SH
   info "✓ 已启用本地 ssh/scp shim（${d}）"
 }
 
+# 只起一个干净的实例，不跑任何用例。压测（tools/benchmark）和手工 SQL 前用它。
+stage_start() {
+  log "起一个干净的实例"
+  start_instance
+  info "✓ 可用：127.0.0.1:2881，root 空密码，数据目录 /tmp/sdb"
+}
+
 stage_test() {
   log "阶段 3/3：跑测例"
-
   kill_mocks
   # 工作目录必须是 tools/deploy：测例里的 --exec 写的是 mysql_test/test_suite/...
   cd "${SRC_DIR}/tools/deploy" || die "找不到 tools/deploy"
@@ -821,10 +827,11 @@ case "${STAGE}" in
   deps)  stage_deps ;;
   build) stage_build ;;
   test)  stage_test ;;
+  start) stage_start ;;
   case)  stage_case "$@" ;;
   save)  stage_save ;;
   save_full) stage_save_full ;;
   restore) stage_restore ;;
   all)   stage_deps; stage_build; stage_test ;;
-  *)     echo "用法: bash $0 {check|deps|build|test|save|save_full|restore|all}"; echo "      bash $0 case <套件/用例> [更多...]"; exit 1 ;;
+  *)     echo "用法: bash $0 {check|deps|build|test|start|save|save_full|restore|all}"; echo "      bash $0 case <套件/用例> [更多...]"; exit 1 ;;
 esac
