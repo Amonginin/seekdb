@@ -51,19 +51,36 @@ bool equals_ignore_case(const common::ObString &text, const char *word)
   return result;
 }
 
+// 取节点的文本：不同字面量 token 填的字段不同（标识符给 raw_text_，
+// 字符串给 str_value_），所以这里三级兜底，别只认一个。
+int node_text(const ParseNode *node, common::ObString &out)
+{
+  int ret = OB_SUCCESS;
+  if (NULL == node) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (NULL != node->str_value_ && node->str_len_ > 0) {
+    out.assign_ptr(node->str_value_, node->str_len_);
+  } else if (NULL != node->raw_text_ && node->text_len_ > 0) {
+    out.assign_ptr(node->raw_text_, node->text_len_);
+  } else if (T_INT == node->type_ || T_BOOL == node->type_) {
+    // 交给调用方按数值处理
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    ret = OB_INVALID_ARGUMENT;
+  }
+  return ret;
+}
+
 // 取选项的文本值
 int get_option_text(const ParseNode *value, common::ObString &out)
 {
   int ret = OB_SUCCESS;
   if (NULL == value) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (NULL != value->str_value_) {
-    out.assign_ptr(value->str_value_, value->str_len_);
-  } else if (T_OP_NEG == value->type_ && NULL != value->children_[0]
-             && NULL != value->children_[0]->str_value_) {
-    out.assign_ptr(value->children_[0]->str_value_, value->children_[0]->str_len_);
+  } else if (T_OP_NEG == value->type_ && NULL != value->children_[0]) {
+    ret = node_text(value->children_[0], out);
   } else {
-    ret = OB_INVALID_ARGUMENT;
+    ret = node_text(value, out);
   }
   return ret;
 }
@@ -85,10 +102,13 @@ int get_option_int(const ParseNode *value, int64_t &out)
     ret = OB_INVALID_ARGUMENT;
   } else if (T_INT == real_value->type_ || T_BOOL == real_value->type_) {
     out = real_value->value_;
-  } else if (NULL != real_value->str_value_) {
-    out = strtoll(real_value->str_value_, NULL, 10);
   } else {
-    ret = OB_INVALID_ARGUMENT;
+    common::ObString text;
+    if (OB_FAIL(node_text(real_value, text))) {
+      LOG_WARN("option value is not a number", K(ret));
+    } else {
+      out = strtoll(text.ptr(), NULL, 10);
+    }
   }
   if (OB_SUCC(ret) && negative) {
     out = -out;
@@ -150,10 +170,11 @@ int parse_file_table_options(const ParseNode *options, FileTableOptions &parsed)
       const ParseNode *name_node = option->children_[0];
       const ParseNode *value_node = option->children_[1];
       common::ObString name;
-      if (NULL == name_node || NULL == name_node->str_value_) {
+      if (NULL == name_node) {
         ret = OB_ERR_UNEXPECTED;
-      } else {
-        name.assign_ptr(name_node->str_value_, name_node->str_len_);
+      } else if (OB_FAIL(node_text(name_node, name))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("file table option has no name", K(ret));
       }
       if (OB_FAIL(ret)) {
       } else if (equals_ignore_case(name, "header")) {
