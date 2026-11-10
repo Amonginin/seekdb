@@ -18,7 +18,6 @@
 #include "config_bridge.h"
 #include "sql/ob_sql.h"
 #include "sql/resolver/dml/ob_dml_stmt.h"
-#include "sql/engine/dml/ob_ai_column_runtime.h"
 #include "sql/resolver/dml/ob_select_stmt.h"
 #include "sql/resolver/expr/ob_raw_expr.h"
 #include "share/schema/ob_table_schema.h"
@@ -2170,10 +2169,6 @@ int check_one_ai_column(share::schema::ObSchemaGetterGuard &guard,
       }
     }
   }
-  ob_ai_trace("[ai] strict probe tid=%lu cid=%lu ai=%d empty=%d ret=%d\n",
-              static_cast<unsigned long>(table_id),
-              static_cast<unsigned long>(probe.column_id_),
-              is_ai_column, has_empty, ret);
   return ret;
 }
 
@@ -2199,7 +2194,6 @@ int ObSql::check_ai_column_strict_read(ObSQLSessionInfo &session,
     common::ObSEArray<AiColumnProbe, 16> probes;
     if (OB_FAIL(collect_ai_column_probes(dml_stmt, allocator, probes))) {
     }
-    ob_ai_trace("[ai] strict probes=%ld ret=%d\n", probes.count(), ret);
     for (int64_t i = 0; OB_SUCC(ret) && i < probes.count(); ++i) {
       if (OB_FAIL(check_one_ai_column(*context.schema_guard_, probes.at(i)))) {
       }

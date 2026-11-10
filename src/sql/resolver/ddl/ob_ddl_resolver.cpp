@@ -15,8 +15,6 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
-#include <fcntl.h>
-#include <unistd.h>
 #include <stdio.h>
 #include "config_bridge.h"
 #include "ob_ddl_resolver.h"
@@ -2371,23 +2369,6 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
   int64_t max_retries = 0;
   ObAiColumnSchema ai_column;
   ObTableSchema *table_schema = NULL;
-  // The module logs are dropped in this build, so the AI column path writes
-  // its own trace to a fixed file.
-  {
-    const int fd = ::open("/tmp/aidbg.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd >= 0) {
-      char buf[256];
-      const int len = snprintf(buf, sizeof(buf), "[ai] resolve col=%.*s children=%d\n",
-                               column.get_column_name_str().length(),
-                               column.get_column_name_str().ptr(),
-                               OB_ISNULL(attr_node) ? -1 : attr_node->num_child_);
-      if (len > 0) {
-        const ssize_t ignored = ::write(fd, buf, static_cast<size_t>(len));
-        UNUSED(ignored);
-      }
-      ::close(fd);
-    }
-  }
   const ObTableSchema *lookup_table_schema = NULL;
   ObCreateTableStmt *create_table_stmt = nullptr;
   ObAlterTableStmt *alter_table_stmt = nullptr;
@@ -2427,23 +2408,9 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
   if (OB_SUCC(ret)) {
     if (OB_FAIL(ObAiColumnResolver::parse_ai_expr(*allocator_, ai_expr, func_name,
                                                   model_name, expr_text, arg_expr_text, dim))) {
+      SQL_RESV_LOG(WARN, "failed to parse the expression of an ai column", K(ret));
     } else if (OB_FAIL(ObAiColumnResolver::parse_ai_options(option_node, sync_mode, max_retries))) {
-    }
-    {
-      const int fd = ::open("/tmp/aidbg.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-      if (fd >= 0) {
-        char buf[512];
-        const int len = snprintf(buf, sizeof(buf),
-                                 "[ai] parsed func=%.*s model=%.*s dim=%ld ret=%d\n",
-                                 func_name.length(), func_name.ptr(),
-                                 model_name.length(), model_name.ptr(),
-                                 static_cast<long>(dim), ret);
-        if (len > 0) {
-          const ssize_t ignored = ::write(fd, buf, static_cast<size_t>(len));
-          UNUSED(ignored);
-        }
-        ::close(fd);
-      }
+      SQL_RESV_LOG(WARN, "failed to parse the options of an ai column", K(ret));
     }
   }
 
@@ -2466,20 +2433,8 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     }
     if (OB_SUCC(ret)) {
       ret = ObAiColumnResolver::check_no_ai_dependency(*allocator_, ai_expr, ai_column_names);
-    }
-    {
-      const int fd = ::open("/tmp/aidbg.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-      if (fd >= 0) {
-        char buf[256];
-        const int len = snprintf(buf, sizeof(buf), "[ai] dep check col=%.*s existing=%ld ret=%d\n",
-                                 column.get_column_name_str().length(),
-                                 column.get_column_name_str().ptr(),
-                                 ai_column_names.count(), ret);
-        if (len > 0) {
-          const ssize_t ignored = ::write(fd, buf, static_cast<size_t>(len));
-          UNUSED(ignored);
-        }
-        ::close(fd);
+      if (OB_FAIL(ret)) {
+        SQL_RESV_LOG(WARN, "an ai column depends on another ai column", K(ret));
       }
     }
   }
@@ -2583,21 +2538,6 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     }
   }
 
-  {
-    const int fd = ::open("/tmp/aidbg.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd >= 0) {
-      char buf[256];
-      const int len = snprintf(buf, sizeof(buf), "[ai] resolve done col=%.*s ret=%d total=%ld\n",
-                               column.get_column_name_str().length(),
-                               column.get_column_name_str().ptr(), ret,
-                               OB_ISNULL(table_schema) ? -1 : table_schema->get_ai_column_count());
-      if (len > 0) {
-        const ssize_t ignored = ::write(fd, buf, static_cast<size_t>(len));
-        UNUSED(ignored);
-      }
-      ::close(fd);
-    }
-  }
   return ret;
 }
 

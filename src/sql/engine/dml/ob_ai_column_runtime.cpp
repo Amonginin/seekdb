@@ -2,10 +2,7 @@
 
 #include "sql/engine/dml/ob_ai_column_runtime.h"
 
-#include <stdarg.h>
 #include <stdio.h>
-#include <fcntl.h>
-#include <unistd.h>
 
 #include "common/object/ob_object.h"
 #include "common/mysqlclient/ob_mysql_proxy.h"
@@ -44,43 +41,7 @@ struct AiFlushGuard
   ~AiFlushGuard() { --g_ai_flush_depth; }
 };
 
-void ai_trace_impl(const char *fmt, ...)
-{
-  const int fd = ::open("/tmp/aidbg.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-  if (fd >= 0) {
-    char buf[1024];
-    va_list args;
-    va_start(args, fmt);
-    const int len = vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
-    if (len > 0) {
-      const int to_write = len < static_cast<int>(sizeof(buf)) ? len : static_cast<int>(sizeof(buf));
-      const ssize_t ignored = ::write(fd, buf, static_cast<size_t>(to_write));
-      UNUSED(ignored);
-    }
-    ::close(fd);
-  }
-}
-
 } // namespace
-
-void ob_ai_trace(const char *fmt, ...)
-{
-  const int fd = ::open("/tmp/aidbg.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-  if (fd >= 0) {
-    char buf[1024];
-    va_list args;
-    va_start(args, fmt);
-    const int len = vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
-    if (len > 0) {
-      const int to_write = len < static_cast<int>(sizeof(buf)) ? len : static_cast<int>(sizeof(buf));
-      const ssize_t ignored = ::write(fd, buf, static_cast<size_t>(to_write));
-      UNUSED(ignored);
-    }
-    ::close(fd);
-  }
-}
 
 namespace {
 
@@ -270,13 +231,11 @@ int load_ai_columns(ObTableModifyOp &op,
 {
   int ret = OB_SUCCESS;
   char sql[4096];
-  ai_trace_impl("[ai] load enter v3 tables=%ld\n", table_ids.count());
   int64_t pos = snprintf(sql, sizeof(sql),
                          "select column_id, column_name, dep_column_ids, max_retries "
                          "from oceanbase.__all_ai_column where table_id in (");
   if (OB_UNLIKELY(pos <= 0 || pos >= static_cast<int64_t>(sizeof(sql)))) {
     ret = OB_SIZE_OVERFLOW;
-    ai_trace_impl("[ai] load build sql failed pos=%ld\n", static_cast<long>(pos));
   } else {
     for (int64_t i = 0; OB_SUCC(ret) && i < table_ids.count(); ++i) {
       const int64_t written = snprintf(sql + pos, sizeof(sql) - pos, "%s%lu",
@@ -284,7 +243,6 @@ int load_ai_columns(ObTableModifyOp &op,
                                        static_cast<unsigned long>(table_ids.at(i)));
       if (OB_UNLIKELY(written <= 0 || pos + written >= static_cast<int64_t>(sizeof(sql)))) {
         ret = OB_SIZE_OVERFLOW;
-        ai_trace_impl("[ai] load build table list failed pos=%ld\n", static_cast<long>(pos));
       } else {
         pos += written;
       }
@@ -293,7 +251,6 @@ int load_ai_columns(ObTableModifyOp &op,
       const int64_t written = snprintf(sql + pos, sizeof(sql) - pos, ")");
       if (OB_UNLIKELY(written <= 0 || pos + written >= static_cast<int64_t>(sizeof(sql)))) {
         ret = OB_SIZE_OVERFLOW;
-        ai_trace_impl("[ai] load build tail failed pos=%ld\n", static_cast<long>(pos));
       } else {
         pos += written;
       }
@@ -312,7 +269,7 @@ int load_ai_columns(ObTableModifyOp &op,
       // the session connection for the read left it in a state that rejected
       // the following writes.
       if (OB_FAIL(GCTX.sql_proxy_->read(res, sql))) {
-        ai_trace_impl("[ai] load read ret=%d sql=%s\n", ret, sql);
+        LOG_WARN("failed to read the ai column definitions", K(ret));
       } else if (OB_ISNULL(result = res.get_result())) {
         ret = OB_ERR_UNEXPECTED;
       } else {
@@ -331,7 +288,6 @@ int load_ai_columns(ObTableModifyOp &op,
             } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(3), retry_obj))) {
             } else if (OB_UNLIKELY(!id_obj.is_integer_type() || !name_obj.is_string_type())) {
               ret = OB_ERR_UNEXPECTED;
-              ai_trace_impl("[ai] load unexpected column types\n");
             } else {
               int64_t id_value = 0;
               int64_t retry_value = 0;
@@ -355,14 +311,13 @@ int load_ai_columns(ObTableModifyOp &op,
           if (OB_ITER_END == ret) {
             ret = OB_SUCCESS;
           } else if (OB_FAIL(ret)) {
-            ai_trace_impl("[ai] load row loop ret=%d metas=%ld\n", ret, metas.count());
+            LOG_WARN("failed to read a row of the ai column definitions", K(ret));
           }
         }
         int close_ret = OB_SUCCESS;
         if (OB_NOT_NULL(result)) {
           close_ret = result->close();
           if (OB_SUCCESS != close_ret) {
-            ai_trace_impl("[ai] load result close ret=%d\n", close_ret);
             if (OB_SUCC(ret)) {
               ret = close_ret;
             }
@@ -371,13 +326,11 @@ int load_ai_columns(ObTableModifyOp &op,
         if (OB_FAIL(ret) && metas.count() > 0) {
           // The rows are already copied out, so a failure while closing the
           // cursor must not throw away usable metadata.
-          ai_trace_impl("[ai] load keeps %ld rows despite ret=%d\n", metas.count(), ret);
           ret = OB_SUCCESS;
         }
       }
     }
   }
-  ai_trace_impl("[ai] load done v3 ret=%d metas=%ld\n", ret, metas.count());
   return ret;
 }
 
@@ -397,7 +350,7 @@ int invalidate_ai_column(ObTableModifyOp &op,
            meta.column_name_.length(), meta.column_name_.ptr(),
            row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr());
   if (OB_FAIL(op.execute_write(sql))) {
-    ai_trace_impl("[ai] invalidate failed ret=%d sql=%s\n", ret, sql);
+    LOG_WARN("failed to clear an ai column", K(ret), KCSTRING(sql));
   }
   return ret;
 }
@@ -422,7 +375,7 @@ int write_task_rows(ObTableModifyOp &op,
   const uint64_t saved_das_flags = das_ctx.flags_;
   das_ctx.is_fk_cascading_ = true;
   if (OB_FAIL(op.open_inner_conn())) {
-    ai_trace_impl("[ai] write open_inner_conn ret=%d\n", ret);
+    LOG_WARN("failed to open the connection of the ai column flush", K(ret));
   } else {
     static std::atomic<int64_t> task_seq(0);
     const int64_t seq = task_seq.fetch_add(1, std::memory_order_relaxed);
@@ -438,11 +391,6 @@ int write_task_rows(ObTableModifyOp &op,
       const ObDmlEventType event = static_cast<ObDmlEventType>(row.dml_event_);
       const bool pk_moved = (ObDmlEventType::DE_UPDATING == event
                              && 0 != row.rowkey_predicate_.compare(row.old_rowkey_predicate_));
-      ai_trace_impl("[ai] row event=%d changed=`%.*s` cleared=`%.*s` pk_moved=%d\n",
-                    row.dml_event_,
-                    row.changed_column_ids_.length(), row.changed_column_ids_.ptr(),
-                    row.cleared_column_ids_.length(), row.cleared_column_ids_.ptr(),
-                    pk_moved);
       for (int64_t k = 0; OB_SUCC(ret) && k < metas.count(); ++k) {
         const AiColumnMeta &meta = metas.at(k);
         char action[3072];
@@ -535,13 +483,9 @@ int write_task_rows(ObTableModifyOp &op,
         }
         if (OB_FAIL(ret)) {
         } else if (OB_FAIL(op.execute_write(action))) {
-          ai_trace_impl("[ai] flush write failed ret=%d sql=%s\n", ret, action);
+          LOG_WARN("failed to write the task of an ai column", K(ret),
+                   KCSTRING(action));
         }
-      }
-      if (OB_SUCC(ret)) {
-        ai_trace_impl("[ai] flushed table_id=%lu pred=%.*s\n",
-                      static_cast<unsigned long>(row.table_id_),
-                      row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr());
       }
     }
   }
@@ -571,8 +515,6 @@ int ObAiColumnRuntime::record_row(ObTableModifyOp &op,
   } else if (OB_ISNULL(sql_ctx) || OB_ISNULL(schema_guard = sql_ctx->schema_guard_)) {
     // Without a schema guard the row key cannot be rendered. The AI column is
     // secondary to the statement, so skip it instead of failing the write.
-    ai_trace_impl("[ai] record skipped, no schema guard table_id=%lu\n",
-                  static_cast<unsigned long>(table_id));
   } else if (OB_FAIL(schema_guard->get_table_schema(table_id, table_schema))) {
   } else if (OB_ISNULL(table_schema)) {
     ret = OB_ERR_UNEXPECTED;
@@ -608,8 +550,8 @@ int ObAiColumnRuntime::record_row(ObTableModifyOp &op,
   }
   if (OB_FAIL(ret)) {
     // A failure here must never fail the statement the user issued.
-    ai_trace_impl("[ai] record failed table_id=%lu ret=%d\n",
-                  static_cast<unsigned long>(table_id), ret);
+    LOG_WARN("failed to record the ai column task of a row", K(ret),
+             K(table_id));
     ret = OB_SUCCESS;
   }
   return ret;
@@ -622,7 +564,6 @@ int ObAiColumnRuntime::flush_pending(ObTableModifyOp &op,
 {
   int ret = OB_SUCCESS;
   has_work = false;
-  ai_trace_impl("[ai] flush enter v3 pending=%ld\n", pending.count());
   if (pending.empty()) {
   } else {
     ObSEArray<uint64_t, 8> table_ids;
@@ -637,17 +578,15 @@ int ObAiColumnRuntime::flush_pending(ObTableModifyOp &op,
     ObSEArray<AiColumnMeta, 8> metas;
     if (OB_FAIL(ret)) {
     } else if (OB_FAIL(load_ai_columns(op, table_ids, alloc, metas))) {
-      ai_trace_impl("[ai] flush load stage ret=%d tables=%ld\n", ret, table_ids.count());
+      LOG_WARN("failed to read the ai column definitions", K(ret));
     } else if (metas.empty()) {
       // None of the touched tables has an AI column.
     } else if (FALSE_IT(has_work = true)) {
     } else if (OB_FAIL(write_task_rows(op, pending, metas))) {
-      ai_trace_impl("[ai] flush write stage ret=%d pending=%ld metas=%ld\n",
-                    ret, pending.count(), metas.count());
+      LOG_WARN("failed to write the ai column tasks", K(ret));
     }
     if (OB_FAIL(ret)) {
       // The AI column must never break the statement the user issued.
-      ai_trace_impl("[ai] flush failed ret=%d\n", ret);
     }
   }
   ret = OB_SUCCESS;

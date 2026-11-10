@@ -7,7 +7,6 @@
 #include "common/object/ob_object.h"
 #include "common/object/ob_obj_type.h"
 #include "lib/ob_define.h"
-#include "sql/engine/dml/ob_ai_column_runtime.h"
 #include "lib/time/ob_time_utility.h"
 #include "share/ob_errno.h"
 #include "share/ob_server_struct.h"
@@ -283,9 +282,8 @@ int load_column_meta(common::ObIAllocator &alloc,
     }
   }
   if (OB_FAIL(ret)) {
-    ob_ai_trace("[aiw] meta failed ret=%d tid=%lu cid=%lu\n", ret,
-                static_cast<unsigned long>(table_id),
-                static_cast<unsigned long>(column_id));
+    LOG_WARN("failed to read the definition of an ai column", K(ret),
+             K(table_id), K(column_id));
   }
   return ret;
 }
@@ -390,7 +388,7 @@ int load_prompts(common::ObIAllocator &alloc,
     }
   }
   if (OB_FAIL(ret) && OB_ITER_END != ret) {
-    ob_ai_trace("[aiw] prompts failed ret=%d sql=%s\n", ret, OB_ISNULL(sql) ? "" : sql);
+    LOG_WARN("failed to evaluate the argument expression of an ai column", K(ret));
   }
   return ret;
 }
@@ -408,30 +406,29 @@ int call_model(common::ObIAllocator &alloc,
   share::ObAiModelEndpointInfo endpoint;
   query::ObIAiEndpointResolver *resolver = NULL;
   if (OB_FAIL(ObAIFuncUtils::get_ai_func_info(alloc, model_name, info))) {
-    ob_ai_trace("[aiw] model info failed ret=%d model=%.*s\n", ret, model_name.length(),
-                model_name.ptr());
+    LOG_WARN("failed to read the ai model of an ai column", K(ret),
+             K(model_name));
   } else if (OB_ISNULL(info)) {
     ret = OB_ERR_UNEXPECTED;
-    ob_ai_trace("[aiw] model info is null model=%.*s\n", model_name.length(),
-                model_name.ptr());
+    LOG_WARN("the ai model of an ai column is gone", K(ret), K(model_name));
   } else if (OB_ISNULL(resolver = ::oceanbase::share::server_service<
                            ::oceanbase::query::ObIAiEndpointResolver>())) {
     ret = OB_ERR_UNEXPECTED;
-    ob_ai_trace("[aiw] no endpoint resolver\n");
+    LOG_WARN("no endpoint resolver for an ai column", K(ret), K(model_name));
   } else if (OB_FAIL(resolver->resolve_by_model_name(model_name, alloc, endpoint))) {
-    ob_ai_trace("[aiw] resolve endpoint failed ret=%d model=%.*s\n", ret,
-                model_name.length(), model_name.ptr());
+    LOG_WARN("failed to resolve the endpoint of an ai model", K(ret),
+             K(model_name));
   } else {
     ObAIFuncModel model(alloc, *info, endpoint);
     ObString system_copy = system_prompt;
     ObString prompt_copy = prompt;
     if (0 == ai_func_name.compare(ObString::make_string("ai_complete"))) {
       if (OB_FAIL(model.call_completion(system_copy, prompt_copy, NULL, result_text))) {
-        ob_ai_trace("[aiw] completion failed ret=%d\n", ret);
+        LOG_WARN("the completion of an ai column failed", K(ret), K(model_name));
       }
     } else if (0 == ai_func_name.compare(ObString::make_string("ai_embed"))) {
       if (OB_FAIL(model.call_dense_embedding(prompt_copy, NULL, result_text))) {
-        ob_ai_trace("[aiw] embedding failed ret=%d\n", ret);
+        LOG_WARN("the embedding of an ai column failed", K(ret), K(model_name));
       }
     } else {
       ret = OB_NOT_SUPPORTED;
@@ -489,10 +486,9 @@ int publish_group(common::ObIAllocator &alloc,
       }
     }
     if (OB_SUCC(ret)) {
-      ob_ai_trace("[aiw] publish sql=%s\n", sql);
       ret = run_sql_write(sql);
       if (OB_FAIL(ret)) {
-        ob_ai_trace("[aiw] publish failed ret=%d\n", ret);
+        LOG_WARN("failed to publish the result of an ai column", K(ret));
       }
     }
   }
@@ -744,7 +740,6 @@ void ObAiColumnWorker::runTimerTask()
 {
   int ret = run_once();
   if (OB_FAIL(ret)) {
-    ob_ai_trace("[aiw] round failed ret=%d\n", ret);
     LOG_WARN("ai column worker round failed", K(ret));
   }
 }
@@ -776,7 +771,6 @@ int ObAiColumnWorker::run_once()
     if (OB_ISNULL(GCTX.sql_proxy_)) {
       ret = OB_NOT_INIT;
     } else if (OB_FAIL(GCTX.sql_proxy_->read(res, sql))) {
-      ob_ai_trace("[aiw] query failed ret=%d\n", ret);
     } else if (OB_ISNULL(result = res.get_result())) {
       ret = OB_ERR_UNEXPECTED;
     } else {
@@ -838,14 +832,11 @@ int ObAiColumnWorker::run_once()
       }
     }
   }
-  ob_ai_trace("[aiw] round rows=%ld ret=%d\n", rows.count(), ret);
   for (int64_t i = 0; OB_SUCC(ret) && i < rows.count(); ++i) {
     const AiTaskRow &row = rows.at(i);
     if (AI_TASK_FAILED == row.state_) {
       // The task ran out of retries but the row is still there, which happens
       // when the worker could not remove it at the time.
-      ob_ai_trace("[aiw] drop failed task rid=%.*s\n", row.request_id_.length(),
-                  row.request_id_.ptr());
       if (OB_FAIL(drop_task(row.table_id_, row.request_id_, row.column_id_))) {
       }
       continue;
@@ -854,9 +845,6 @@ int ObAiColumnWorker::run_once()
       // The request is waiting for its next attempt.
       continue;
     }
-    ob_ai_trace("[aiw] task rid=%.*s cid=%lu state=%ld\n", row.request_id_.length(),
-                row.request_id_.ptr(), static_cast<unsigned long>(row.column_id_),
-                row.state_);
     // The rows of one request are neighbours, because the query orders them by
     // the request id.
     bool handled = false;
@@ -880,7 +868,6 @@ int ObAiColumnWorker::run_once()
       // written into the status of the round.
       if (OB_SUCCESS != request_ret) {
         // One failing request must not stop the other requests.
-        ob_ai_trace("[aiw] request failed ret=%d\n", request_ret);
         LOG_WARN("failed to process an ai column request", K(request_ret));
       }
     }

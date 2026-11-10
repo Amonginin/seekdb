@@ -817,7 +817,6 @@ int ObTableModifyOp::inner_close()
   OX(schedule_ai_columns_for_rows());
   close_inner_conn();
   dml_modify_rows_.clear();
-  ob_ai_trace("[ai] inner_close ret=%d\n", ret);
   return ret;
 }
 

@@ -16,10 +16,6 @@ namespace sql
 class ObTableModifyOp;
 struct ObDMLBaseCtDef;
 
-// Diagnostic sink of the AI column path. seekdb drops the usual warning log in
-// the deployment used for testing, so the messages go to a plain file.
-void ob_ai_trace(const char *fmt, ...);
-
 // One row that needs its AI columns recomputed. Only the identifying
 // information is kept: table, kind of change, the rowkey predicate and the
 // columns that really changed. Nothing here executes SQL.
