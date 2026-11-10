@@ -2027,49 +2027,65 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
 
 namespace {
 
-// Appends the (table_id, column_id) of an AI column to the pair of lists,
-// skipping the ones already there.
-int add_ai_column_ref(const uint64_t table_id,
-                      const uint64_t column_id,
-                      common::ObIArray<uint64_t> &table_ids,
-                      common::ObIArray<uint64_t> &column_ids)
+// One column a statement reads, with the names needed to look it up.
+struct AiColumnProbe
 {
-  int ret = OB_SUCCESS;
+  AiColumnProbe()
+    : table_id_(common::OB_INVALID_ID),
+      column_id_(common::OB_INVALID_ID)
+  {}
+  uint64_t table_id_;
+  uint64_t column_id_;
+  common::ObString database_name_;
+  common::ObString table_name_;
+  common::ObString column_name_;
+};
+
+// Finds the names of the table a column belongs to. The statement has already
+// resolved them, so no schema lookup is needed.
+bool find_table_names(ObDMLStmt &stmt,
+                      const uint64_t table_id,
+                      common::ObString &database_name,
+                      common::ObString &table_name)
+{
   bool found = false;
-  for (int64_t i = 0; !found && i < table_ids.count(); ++i) {
-    found = (table_ids.at(i) == table_id && column_ids.at(i) == column_id);
-  }
-  if (!found) {
-    if (OB_FAIL(table_ids.push_back(table_id))) {
-    } else if (OB_FAIL(column_ids.push_back(column_id))) {
+  for (int64_t i = 0; !found && i < stmt.get_table_size(); ++i) {
+    TableItem &item = stmt.get_table_item(i);
+    if (item.get_table_id() == table_id) {
+      database_name = item.get_database_name();
+      table_name = item.get_table_name();
+      found = true;
     }
   }
-  return ret;
+  return found;
 }
 
-// Collects the AI columns a statement exposes, including the columns of its
-// subqueries.
-int collect_ai_column_refs(share::schema::ObSchemaGetterGuard &schema_guard,
-                           ObDMLStmt &stmt,
-                           common::ObIArray<uint64_t> &table_ids,
-                           common::ObIArray<uint64_t> &column_ids)
+// Collects the columns a statement reads, looking into its subqueries.
+int collect_ai_column_probes(ObDMLStmt &stmt,
+                             common::ObIAllocator &alloc,
+                             common::ObIArray<AiColumnProbe> &probes)
 {
   int ret = OB_SUCCESS;
   common::ObIArray<ColumnItem> &items = stmt.get_column_items();
   for (int64_t i = 0; OB_SUCC(ret) && i < items.count(); ++i) {
     const ObColumnRefRawExpr *expr = items.at(i).get_expr();
+    AiColumnProbe probe;
     if (OB_ISNULL(expr)) {
-      // a column of the statement that has no expression, nothing to check
+      // a column of the statement without an expression, nothing to check
+    } else if (FALSE_IT(probe.table_id_ = expr->get_table_id())) {
+    } else if (FALSE_IT(probe.column_id_ = expr->get_column_id())) {
+    } else if (!find_table_names(stmt, probe.table_id_, probe.database_name_,
+                                 probe.table_name_)) {
+      // the column of a table that is not part of this statement
+    } else if (OB_FAIL(ob_write_string(alloc, expr->get_column_name(),
+                                       probe.column_name_))) {
     } else {
-      const uint64_t table_id = expr->get_table_id();
-      const uint64_t column_id = expr->get_column_id();
-      const share::schema::ObTableSchema *table_schema = NULL;
-      if (OB_FAIL(schema_guard.get_table_schema(table_id, table_schema))) {
-      } else if (OB_ISNULL(table_schema)) {
-        // the table is gone, the statement fails later with its own error
-      } else if (OB_NOT_NULL(table_schema->get_ai_column_by_column_id(column_id))) {
-        if (OB_FAIL(add_ai_column_ref(table_id, column_id, table_ids, column_ids))) {
-        }
+      bool seen = false;
+      for (int64_t k = 0; !seen && k < probes.count(); ++k) {
+        seen = (probes.at(k).table_id_ == probe.table_id_
+                && probes.at(k).column_id_ == probe.column_id_);
+      }
+      if (!seen && OB_FAIL(probes.push_back(probe))) {
       }
     }
   }
@@ -2077,71 +2093,73 @@ int collect_ai_column_refs(share::schema::ObSchemaGetterGuard &schema_guard,
   for (int64_t i = 0; OB_SUCC(ret) && i < subqueries.count(); ++i) {
     ObSelectStmt *sub_stmt = subqueries.at(i)->get_ref_stmt();
     if (OB_NOT_NULL(sub_stmt)
-        && OB_FAIL(SMART_CALL(collect_ai_column_refs(schema_guard, *sub_stmt,
-                                                     table_ids, column_ids)))) {
+        && OB_FAIL(SMART_CALL(collect_ai_column_probes(*sub_stmt, alloc, probes)))) {
     }
   }
   return ret;
 }
 
-// Rejects the statement when the given AI column still has rows without a
-// result. A failed request leaves the column null as well, so a column that
-// ran out of retries is not readable in strict mode either.
-int check_one_ai_column(share::schema::ObSchemaGetterGuard &schema_guard,
-                        const uint64_t table_id,
-                        const uint64_t column_id)
+// Reads the first row of a query and tells whether the query found one.
+int query_has_row(const char *sql, bool &has_row)
 {
   int ret = OB_SUCCESS;
-  const share::schema::ObTableSchema *table_schema = NULL;
-  const share::schema::ObDatabaseSchema *database_schema = NULL;
-  const share::schema::ObColumnSchemaV2 *column_schema = NULL;
-  char sql[1024];
-  if (OB_FAIL(schema_guard.get_table_schema(table_id, table_schema))) {
-  } else if (OB_ISNULL(table_schema)) {
-    // nothing to check
-  } else if (OB_FAIL(schema_guard.get_database_schema(table_schema->get_database_id(),
-                                                      database_schema))) {
-  } else if (OB_ISNULL(database_schema)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_ISNULL(column_schema = table_schema->get_column_schema(column_id))) {
-    ret = OB_ERR_UNEXPECTED;
-  } else {
-    const int64_t written = snprintf(
-        sql, sizeof(sql), "select 1 from `%.*s`.`%.*s` where `%.*s` is null limit 1",
-        database_schema->get_database_name_str().length(),
-        database_schema->get_database_name_str().ptr(),
-        table_schema->get_table_name_str().length(),
-        table_schema->get_table_name_str().ptr(),
-        column_schema->get_column_name_str().length(),
-        column_schema->get_column_name_str().ptr());
-    if (OB_UNLIKELY(written <= 0 || written >= static_cast<int64_t>(sizeof(sql)))) {
-      ret = OB_SIZE_OVERFLOW;
+  has_row = false;
+  SMART_VAR(common::ObMySQLProxy::MySQLResult, res) {
+    sqlclient::ObMySQLResult *result = NULL;
+    if (OB_ISNULL(GCTX.sql_proxy_)) {
+      ret = OB_NOT_INIT;
+    } else if (OB_FAIL(GCTX.sql_proxy_->read(res, sql))) {
+    } else if (OB_ISNULL(result = res.get_result())) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(result->next())) {
+      if (OB_ITER_END == ret) {
+        ret = OB_SUCCESS;
+      }
     } else {
-      SMART_VAR(common::ObMySQLProxy::MySQLResult, res) {
-        sqlclient::ObMySQLResult *result = NULL;
-        if (OB_ISNULL(GCTX.sql_proxy_)) {
-          ret = OB_NOT_INIT;
-        } else if (OB_FAIL(GCTX.sql_proxy_->read(res, sql))) {
-        } else if (OB_ISNULL(result = res.get_result())) {
-          ret = OB_ERR_UNEXPECTED;
-        } else if (OB_FAIL(result->next())) {
-          if (OB_ITER_END == ret) {
-            // every row of the column has a result
-            ret = OB_SUCCESS;
-          }
-        } else {
-          ret = OB_AI_COLUMN_NOT_READY;
-          LOG_USER_ERROR(OB_AI_COLUMN_NOT_READY,
-                         static_cast<unsigned long>(table_id),
-                         static_cast<unsigned long>(column_id));
-        }
-      }
-      if (OB_FAIL(ret)) {
-        ob_ai_trace("[ai] strict column check tid=%lu cid=%lu ret=%d\n",
-                    static_cast<unsigned long>(table_id),
-                    static_cast<unsigned long>(column_id), ret);
-      }
+      has_row = true;
     }
+  }
+  return ret;
+}
+
+// Rejects the statement when the column is an AI column that still has rows
+// without a result. The definition lives in an inner table, which is also the
+// only place the metadata is fully populated: the array that travels with the
+// table schema is filled on the DDL path only.
+int check_one_ai_column(const AiColumnProbe &probe)
+{
+  int ret = OB_SUCCESS;
+  char sql[1024];
+  bool is_ai_column = false;
+  snprintf(sql, sizeof(sql),
+           "select 1 from oceanbase.__all_ai_column where table_id = %lu "
+           "and column_id = %lu limit 1",
+           static_cast<unsigned long>(probe.table_id_),
+           static_cast<unsigned long>(probe.column_id_));
+  if (OB_FAIL(query_has_row(sql, is_ai_column))) {
+  } else if (!is_ai_column) {
+    // an ordinary column is readable whatever the session asks for
+  } else {
+    bool has_empty = false;
+    snprintf(sql, sizeof(sql),
+             "select 1 from `%.*s`.`%.*s` where `%.*s` is null limit 1",
+             probe.database_name_.length(), probe.database_name_.ptr(),
+             probe.table_name_.length(), probe.table_name_.ptr(),
+             probe.column_name_.length(), probe.column_name_.ptr());
+    if (OB_FAIL(query_has_row(sql, has_empty))) {
+    } else if (!has_empty) {
+      // every row of the column has a result
+    } else {
+      ret = OB_AI_COLUMN_NOT_READY;
+      LOG_USER_ERROR(OB_AI_COLUMN_NOT_READY,
+                     static_cast<unsigned long>(probe.table_id_),
+                     static_cast<unsigned long>(probe.column_id_));
+    }
+  }
+  if (OB_FAIL(ret)) {
+    ob_ai_trace("[ai] strict column tid=%lu cid=%lu ret=%d\n",
+                static_cast<unsigned long>(probe.table_id_),
+                static_cast<unsigned long>(probe.column_id_), ret);
   }
   return ret;
 }
@@ -2155,34 +2173,23 @@ int ObSql::check_ai_column_strict_read(ObSQLSessionInfo &session,
 {
   int ret = OB_SUCCESS;
   bool strict = false;
-  UNUSED(allocator);
+  UNUSED(context);
   const int get_ret = session.get_ai_column_strict_read(strict);
-  ob_ai_trace("[ai] strict get ret=%d on=%d stmt=%d\n", get_ret, strict,
-              static_cast<int>(stmt.get_stmt_type()));
   if (OB_FAIL(get_ret)) {
   } else if (!strict) {
     // a session that does not ask for strict reads sees the partial results
   } else if (!ObStmt::is_dml_stmt(stmt.get_stmt_type())) {
     // only a statement that reads a table can reach an AI column
-  } else if (OB_ISNULL(context.schema_guard_)) {
-    ret = OB_ERR_UNEXPECTED;
-    ob_ai_trace("[ai] strict no schema guard\n");
   } else {
     ObDMLStmt &dml_stmt = static_cast<ObDMLStmt &>(stmt);
-    common::ObSEArray<uint64_t, 16> table_ids;
-    common::ObSEArray<uint64_t, 16> column_ids;
-    if (OB_FAIL(collect_ai_column_refs(*context.schema_guard_, dml_stmt,
-                                       table_ids, column_ids))) {
+    common::ObSEArray<AiColumnProbe, 16> probes;
+    if (OB_FAIL(collect_ai_column_probes(dml_stmt, allocator, probes))) {
     }
-    ob_ai_trace("[ai] strict cols=%ld ret=%d\n", table_ids.count(), ret);
-    for (int64_t i = 0; OB_SUCC(ret) && i < table_ids.count(); ++i) {
-      if (OB_FAIL(check_one_ai_column(*context.schema_guard_, table_ids.at(i),
-                                      column_ids.at(i)))) {
+    ob_ai_trace("[ai] strict probes=%ld ret=%d\n", probes.count(), ret);
+    for (int64_t i = 0; OB_SUCC(ret) && i < probes.count(); ++i) {
+      if (OB_FAIL(check_one_ai_column(probes.at(i)))) {
       }
     }
-  }
-  if (OB_FAIL(ret)) {
-    ob_ai_trace("[ai] strict reject ret=%d\n", ret);
   }
   return ret;
 }
