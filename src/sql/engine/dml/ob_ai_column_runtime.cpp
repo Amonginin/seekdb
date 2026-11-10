@@ -433,14 +433,17 @@ int write_task_rows(ObTableModifyOp &op,
           if (OB_SUCC(ret)) {
             snprintf(action, sizeof(action),
                      "insert into %s (table_id, request_id, column_id, column_name, "
-                     "rowkey_predicate, state, retry_count, eligible_ts) "
-                     "values (%lu, '%s', %lu, '%.*s', '%.*s', 0, 0, now())",
+                     "rowkey_predicate, database_name, table_name, state, retry_count, "
+                     "eligible_ts) values (%lu, '%s', %lu, '%.*s', '%.*s', '%.*s', '%.*s', "
+                     "0, 0, now())",
                      AI_TASK_TABLE_NAME,
                      static_cast<unsigned long>(row.table_id_),
                      request_id,
                      static_cast<unsigned long>(meta.column_id_),
                      meta.column_name_.length(), meta.column_name_.ptr(),
-                     row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr());
+                     row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr(),
+                     row.database_name_.length(), row.database_name_.ptr(),
+                     row.table_name_.length(), row.table_name_.ptr());
           }
         } else if (ObDmlEventType::DE_UPDATING == event) {
           // Same row, new value: replace the task so a result that is still in
@@ -460,26 +463,32 @@ int write_task_rows(ObTableModifyOp &op,
           if (OB_SUCC(ret)) {
             snprintf(action, sizeof(action),
                      "insert into %s (table_id, request_id, column_id, column_name, "
-                     "rowkey_predicate, state, retry_count, eligible_ts) "
-                     "values (%lu, '%s', %lu, '%.*s', '%.*s', 0, 0, now())",
+                     "rowkey_predicate, database_name, table_name, state, retry_count, "
+                     "eligible_ts) values (%lu, '%s', %lu, '%.*s', '%.*s', '%.*s', '%.*s', "
+                     "0, 0, now())",
                      AI_TASK_TABLE_NAME,
                      static_cast<unsigned long>(row.table_id_),
                      request_id,
                      static_cast<unsigned long>(meta.column_id_),
                      meta.column_name_.length(), meta.column_name_.ptr(),
-                     row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr());
+                     row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr(),
+                     row.database_name_.length(), row.database_name_.ptr(),
+                     row.table_name_.length(), row.table_name_.ptr());
           }
         } else {
           snprintf(action, sizeof(action),
                    "insert into %s (table_id, request_id, column_id, column_name, "
-                   "rowkey_predicate, state, retry_count, eligible_ts) "
-                   "values (%lu, '%s', %lu, '%.*s', '%.*s', 0, 0, now())",
+                   "rowkey_predicate, database_name, table_name, state, retry_count, "
+                   "eligible_ts) values (%lu, '%s', %lu, '%.*s', '%.*s', '%.*s', '%.*s', "
+                   "0, 0, now())",
                    AI_TASK_TABLE_NAME,
                    static_cast<unsigned long>(row.table_id_),
                    request_id,
                    static_cast<unsigned long>(meta.column_id_),
                    meta.column_name_.length(), meta.column_name_.ptr(),
-                   row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr());
+                   row.rowkey_predicate_.length(), row.rowkey_predicate_.ptr(),
+                   row.database_name_.length(), row.database_name_.ptr(),
+                   row.table_name_.length(), row.table_name_.ptr());
         }
         if (OB_FAIL(ret)) {
         } else if (OB_FAIL(op.execute_write(action))) {

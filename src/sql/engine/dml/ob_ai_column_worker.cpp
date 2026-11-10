@@ -7,6 +7,7 @@
 #include "common/object/ob_object.h"
 #include "common/object/ob_obj_type.h"
 #include "lib/ob_define.h"
+#include "sql/engine/dml/ob_ai_column_runtime.h"
 #include "lib/time/ob_time_utility.h"
 #include "share/ob_errno.h"
 #include "share/ob_server_struct.h"
@@ -175,6 +176,11 @@ int load_column_meta(common::ObIAllocator &alloc,
       }
     }
   }
+  if (OB_FAIL(ret)) {
+    ob_ai_trace("[aiw] meta failed ret=%d tid=%lu cid=%lu\n", ret,
+                static_cast<unsigned long>(table_id),
+                static_cast<unsigned long>(column_id));
+  }
   return ret;
 }
 
@@ -278,6 +284,9 @@ int load_prompts(common::ObIAllocator &alloc,
       }
     }
   }
+  if (OB_FAIL(ret) && OB_ITER_END != ret) {
+    ob_ai_trace("[aiw] prompts failed ret=%d sql=%s\n", ret, OB_ISNULL(sql) ? "" : sql);
+  }
   return ret;
 }
 
@@ -294,21 +303,30 @@ int call_model(common::ObIAllocator &alloc,
   share::ObAiModelEndpointInfo endpoint;
   query::ObIAiEndpointResolver *resolver = NULL;
   if (OB_FAIL(ObAIFuncUtils::get_ai_func_info(alloc, model_name, info))) {
+    ob_ai_trace("[aiw] model info failed ret=%d model=%.*s\n", ret, model_name.length(),
+                model_name.ptr());
   } else if (OB_ISNULL(info)) {
     ret = OB_ERR_UNEXPECTED;
+    ob_ai_trace("[aiw] model info is null model=%.*s\n", model_name.length(),
+                model_name.ptr());
   } else if (OB_ISNULL(resolver = ::oceanbase::share::server_service<
                            ::oceanbase::query::ObIAiEndpointResolver>())) {
     ret = OB_ERR_UNEXPECTED;
+    ob_ai_trace("[aiw] no endpoint resolver\n");
   } else if (OB_FAIL(resolver->resolve_by_model_name(model_name, alloc, endpoint))) {
+    ob_ai_trace("[aiw] resolve endpoint failed ret=%d model=%.*s\n", ret,
+                model_name.length(), model_name.ptr());
   } else {
     ObAIFuncModel model(alloc, *info, endpoint);
     ObString system_copy = system_prompt;
     ObString prompt_copy = prompt;
     if (0 == ai_func_name.compare(ObString::make_string("ai_complete"))) {
       if (OB_FAIL(model.call_completion(system_copy, prompt_copy, NULL, result_text))) {
+        ob_ai_trace("[aiw] completion failed ret=%d\n", ret);
       }
     } else if (0 == ai_func_name.compare(ObString::make_string("ai_embed"))) {
       if (OB_FAIL(model.call_dense_embedding(prompt_copy, NULL, result_text))) {
+        ob_ai_trace("[aiw] embedding failed ret=%d\n", ret);
       }
     } else {
       ret = OB_NOT_SUPPORTED;
@@ -366,7 +384,11 @@ int publish_group(common::ObIAllocator &alloc,
       }
     }
     if (OB_SUCC(ret)) {
+      ob_ai_trace("[aiw] publish sql=%s\n", sql);
       ret = run_sql_write(sql);
+      if (OB_FAIL(ret)) {
+        ob_ai_trace("[aiw] publish failed ret=%d\n", ret);
+      }
     }
   }
   return ret;
@@ -613,8 +635,10 @@ int ObAiColumnWorker::schedule(common::ObTimer &timer)
 
 void ObAiColumnWorker::runTimerTask()
 {
+  ob_ai_trace("[aiw] tick\n");
   int ret = run_once();
   if (OB_FAIL(ret)) {
+    ob_ai_trace("[aiw] round failed ret=%d\n", ret);
     LOG_WARN("ai column worker round failed", K(ret));
   }
 }
@@ -624,14 +648,16 @@ int ObAiColumnWorker::run_once()
   int ret = OB_SUCCESS;
   char sql[1024];
   alloc_.reset();
+  // The task table carries the name of the database and of the table, so the
+  // worker does not have to join the system tables. A join of an inner table
+  // with the system tables fails with "tablet does not exist" in the session
+  // of the server proxy.
   snprintf(sql, sizeof(sql),
-           "select t.table_id, t.request_id, t.column_id, t.column_name, "
-           "t.rowkey_predicate, t.retry_count, d.database_name, tb.table_name "
-           "from %s t "
-           "join oceanbase.__all_table tb on tb.table_id = t.table_id "
-           "join oceanbase.__all_database d on d.database_id = tb.database_id "
-           "where t.state in (%d, %d) and (t.eligible_ts is null or t.eligible_ts <= now(6)) "
-           "order by t.table_id, t.request_id, t.column_id "
+           "select table_id, request_id, column_id, column_name, rowkey_predicate, "
+           "retry_count, database_name, table_name "
+           "from %s "
+           "where state in (%d, %d) and (eligible_ts is null or eligible_ts <= now(6)) "
+           "order by table_id, request_id, column_id "
            "limit %ld",
            AI_TASK_TABLE, AI_TASK_PENDING, AI_TASK_RETRYING, MAX_TASKS_PER_ROUND);
   ObSEArray<AiTaskRow, 64> rows;
@@ -640,6 +666,7 @@ int ObAiColumnWorker::run_once()
     if (OB_ISNULL(GCTX.sql_proxy_)) {
       ret = OB_NOT_INIT;
     } else if (OB_FAIL(GCTX.sql_proxy_->read(res, sql))) {
+      ob_ai_trace("[aiw] query failed ret=%d\n", ret);
     } else if (OB_ISNULL(result = res.get_result())) {
       ret = OB_ERR_UNEXPECTED;
     } else {
@@ -671,6 +698,7 @@ int ObAiColumnWorker::run_once()
       }
     }
   }
+  ob_ai_trace("[aiw] round rows=%ld ret=%d\n", rows.count(), ret);
   for (int64_t i = 0; OB_SUCC(ret) && i < rows.count(); ++i) {
     // The rows of one request are neighbours, because the query orders them by
     // the request id.
@@ -693,6 +721,7 @@ int ObAiColumnWorker::run_once()
       const int request_ret = process_request(request_rows);
       if (OB_FAIL(request_ret)) {
         // One failing request must not stop the other requests.
+        ob_ai_trace("[aiw] request failed ret=%d\n", request_ret);
         LOG_WARN("failed to process an ai column request", K(request_ret));
       }
     }
