@@ -67,7 +67,9 @@ struct AiTaskRow
   AiTaskRow()
     : table_id_(common::OB_INVALID_ID),
       column_id_(common::OB_INVALID_ID),
-      retry_count_(0)
+      retry_count_(0),
+      state_(AI_TASK_PENDING),
+      wait_us_(0)
   {}
   uint64_t table_id_;
   uint64_t column_id_;
@@ -77,6 +79,9 @@ struct AiTaskRow
   ObString database_name_;
   ObString table_name_;
   int64_t retry_count_;
+  int64_t state_;
+  // Microseconds until the task is due. Zero or less means it is due now.
+  int64_t wait_us_;
 };
 
 // Reads an integer column of any width. The typed getters of the result only
@@ -668,7 +673,9 @@ int process_request(const common::ObIArray<AiTaskRow> &rows)
             const int model_ret = call_model(alloc, plan.ai_func_name_,
                                              plan.model_name_, plan.system_prompt_,
                                              plan.prompt_, answer);
-            if (OB_FAIL(model_ret)) {
+            // The result of the call is a value, not the status of the round:
+            // OB_FAIL would overwrite ret and skip the bookkeeping below.
+            if (OB_SUCCESS != model_ret) {
               failed++;
               failed_ret = model_ret;
             } else if (OB_FAIL(ob_write_string(alloc, answer, plan.answer_))) {
@@ -752,14 +759,13 @@ int ObAiColumnWorker::run_once()
   // with the system tables fails with "tablet does not exist" in the session
   // of the server proxy.
   //
-  // The rows are not filtered here at all. A task row is removed as soon as it
-  // is done or has run out of retries, so every row of the table is a task
-  // that still has to be worked on. Both the state and the due time are left
-  // out of the query: reading a timestamp column of an inner table through
-  // the server proxy fails with an object type error.
+  // The due time is a timestamp column, which cannot be read through the
+  // proxy. It is turned into a number of microseconds by the query itself, so
+  // the session time zone of the proxy does not affect the comparison.
   snprintf(sql, sizeof(sql),
            "select table_id, request_id, column_id, column_name, rowkey_predicate, "
-           "retry_count, database_name, table_name "
+           "retry_count, database_name, table_name, state, "
+           "ifnull(cast(timestampdiff(microsecond, now(6), eligible_ts) as signed), 0) "
            "from %s "
            "order by table_id, request_id, column_id "
            "limit %ld",
@@ -789,6 +795,8 @@ int ObAiColumnWorker::run_once()
         ObObj retry_obj;
         ObObj db_obj;
         ObObj table_obj;
+        ObObj state_obj;
+        ObObj wait_obj;
         int64_t id_value = 0;
         int64_t column_value = 0;
         if (OB_FAIL(result->get_obj(static_cast<int64_t>(0), id_obj))) {
@@ -799,9 +807,13 @@ int ObAiColumnWorker::run_once()
         } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(5), retry_obj))) {
         } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(6), db_obj))) {
         } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(7), table_obj))) {
+        } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(8), state_obj))) {
+        } else if (OB_FAIL(result->get_obj(static_cast<int64_t>(9), wait_obj))) {
         } else if (OB_FAIL(obj_to_int(id_obj, id_value))) {
         } else if (OB_FAIL(obj_to_int(column_obj, column_value))) {
         } else if (OB_FAIL(obj_to_int(retry_obj, row.retry_count_))) {
+        } else if (OB_FAIL(obj_to_int(state_obj, row.state_))) {
+        } else if (OB_FAIL(obj_to_int(wait_obj, row.wait_us_))) {
         } else if (OB_FAIL(obj_to_string(request_obj, request_id))) {
         } else if (OB_FAIL(obj_to_string(name_obj, column_name))) {
         } else if (OB_FAIL(obj_to_string(predicate_obj, predicate))) {
@@ -828,9 +840,23 @@ int ObAiColumnWorker::run_once()
   }
   ob_ai_trace("[aiw] round rows=%ld ret=%d\n", rows.count(), ret);
   for (int64_t i = 0; OB_SUCC(ret) && i < rows.count(); ++i) {
-    ob_ai_trace("[aiw] task rid=%.*s cid=%lu\n", rows.at(i).request_id_.length(),
-                rows.at(i).request_id_.ptr(),
-                static_cast<unsigned long>(rows.at(i).column_id_));
+    const AiTaskRow &row = rows.at(i);
+    if (AI_TASK_FAILED == row.state_) {
+      // The task ran out of retries but the row is still there, which happens
+      // when the worker could not remove it at the time.
+      ob_ai_trace("[aiw] drop failed task rid=%.*s\n", row.request_id_.length(),
+                  row.request_id_.ptr());
+      if (OB_FAIL(drop_task(row.table_id_, row.request_id_, row.column_id_))) {
+      }
+      continue;
+    }
+    if (row.wait_us_ > 0) {
+      // The request is waiting for its next attempt.
+      continue;
+    }
+    ob_ai_trace("[aiw] task rid=%.*s cid=%lu state=%ld\n", row.request_id_.length(),
+                row.request_id_.ptr(), static_cast<unsigned long>(row.column_id_),
+                row.state_);
     // The rows of one request are neighbours, because the query orders them by
     // the request id.
     bool handled = false;
@@ -850,7 +876,9 @@ int ObAiColumnWorker::run_once()
     }
     if (OB_SUCC(ret)) {
       const int request_ret = process_request(request_rows);
-      if (OB_FAIL(request_ret)) {
+      // The next request must still be tried, so the result of this one is not
+      // written into the status of the round.
+      if (OB_SUCCESS != request_ret) {
         // One failing request must not stop the other requests.
         ob_ai_trace("[aiw] request failed ret=%d\n", request_ret);
         LOG_WARN("failed to process an ai column request", K(request_ret));
