@@ -804,16 +804,18 @@ int ObTableModifyOp::inner_close()
       auto_service.release_handle(autoinc_params.at(i).cache_handle_);
     }
   }
-  // Write the AI column task rows while the transaction of the statement is
-  // still open, then release the connection it used.
-  OX(schedule_ai_columns_for_rows());
-  close_inner_conn();
+  // (the AI column task rows are written after the writes are closed)
   if (dml_rtctx_.das_ref_.has_task()) {
     if (OB_FAIL(dml_rtctx_.das_ref_.close_all_task())) {
     } else {
       dml_rtctx_.das_ref_.reset();
     }
   }
+  // Write the AI column task rows only after every write of the statement has
+  // been closed: the two write paths share the connection of the session, and
+  // interleaving them made the statement fail with an internal error.
+  OX(schedule_ai_columns_for_rows());
+  close_inner_conn();
   dml_modify_rows_.clear();
   return ret;
 }
