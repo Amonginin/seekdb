@@ -574,14 +574,23 @@ stage_save_full() {
   if [ ! -d "${SRC_DIR}/build_release" ]; then
     die "${SRC_DIR}/build_release 不存在，先编译"
   fi
-  local out="${NAS_DIR}/build_release.tgz"
+  local out="${NAS_DIR}/build_release.tar.gz"
   info "后台打包 ${SRC_DIR}/build_release → ${out}"
   info "预计十几分钟。用 tail -f ${LOG_DIR}/save_full.log 跟踪"
-  # 后台子 shell 里用不到 pack 函数，这里直接用 tar 自带的 gzip。
-  nohup bash -c "tar -C '${SRC_DIR}' -czf '${out}.part' build_release \
+
+  # 后台子 shell 里拿不到 pack 函数，所以把压缩命令直接展开。
+  # 有 pigz 就走 pigz（并行），没有就退回 tar 自带的 gzip（单线程，慢一点）。
+  local comp
+  if [ "${HAVE_PIGZ}" = "1" ]; then
+    comp="pigz -1"
+  else
+    comp="gzip -1"
+    info "! 没有 pigz，将用单线程 gzip，压缩时间会长很多"
+  fi
+  nohup bash -c "tar -cf - -C '${SRC_DIR}' build_release | ${comp} > '${out}.part' \
     && mv '${out}.part' '${out}' && echo DONE > '${out}.done'" \
     > "${LOG_DIR}/save_full.log" 2>&1 &
-  info "✓ 后台任务 pid=$!"
+  info "✓ 后台任务 pid=$!（${NCPU} 核）"
 }
 
 # ---------------------------------------------------------------- restore
