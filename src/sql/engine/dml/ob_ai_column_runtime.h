@@ -31,7 +31,7 @@ public:
       dml_event_(0)
   {}
   TO_STRING_KV(K_(table_id), K_(dml_event), K_(rowkey_predicate),
-               K_(old_rowkey_predicate), K_(changed_column_ids));
+               K_(old_rowkey_predicate), K_(changed_column_ids), K_(cleared_column_ids));
   uint64_t table_id_;
   int64_t dml_event_;
   common::ObString rowkey_predicate_;
@@ -39,6 +39,9 @@ public:
   // old row can be dropped when the primary key moved.
   common::ObString old_rowkey_predicate_;
   common::ObString changed_column_ids_;
+  // The columns whose new value is null. Clearing an AI column asks for it to
+  // be computed again; writing a result into it does not.
+  common::ObString cleared_column_ids_;
   // Names of the touched table, used to mark the row with its request id.
   common::ObString database_name_;
   common::ObString table_name_;

@@ -18,6 +18,7 @@
 #include "config_bridge.h"
 #include "sql/resolver/ddl/ob_alter_table_resolver.h"
 #include "sql/resolver/ddl/ob_ai_column_resolver.h"
+#include "sql/engine/dml/ob_ai_column_runtime.h"
 #include "sql/resolver/expr/ob_raw_expr_part_expr_checker.h"
 #include "sql/resolver/dml/ob_delete_resolver.h"
 #include "sql/resolver/ddl/ob_index_builder_util.h"
@@ -442,6 +443,9 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
                          *allocator_, where_node, column_name, predicate))) {
           } else {
             alter_table_stmt->set_ai_column_retry(column_name, predicate);
+            ob_ai_trace("[ai] retry resolved col=%.*s pred=%.*s\n",
+                        column_name.length(), column_name.ptr(),
+                        predicate.length(), predicate.ptr());
           }
           break;
         }

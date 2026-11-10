@@ -170,12 +170,17 @@ int build_rowkey_predicate(ObTableModifyOp &op,
   return ret;
 }
 
-// Collects the ids of the columns whose value really changed. An update that
-// touches nothing the AI function reads must not invalidate the column.
-int collect_changed_ids(ObTableModifyOp &op,
-                        const ObDMLBaseCtDef &ctdef,
-                        common::ObIAllocator &alloc,
-                        ObString &changed_ids)
+// Collects the ids of the columns whose value changed. An update that touches
+// nothing the AI function reads must not invalidate the column.
+//
+// With only_cleared the list holds the columns whose new value is null: that
+// is how a request to compute a column again is expressed, so publishing a
+// result does not count as one.
+int collect_column_ids(ObTableModifyOp &op,
+                       const ObDMLBaseCtDef &ctdef,
+                       common::ObIAllocator &alloc,
+                       const bool only_cleared,
+                       ObString &ids)
 {
   int ret = OB_SUCCESS;
   char buf[512];
@@ -184,6 +189,7 @@ int collect_changed_ids(ObTableModifyOp &op,
   ObEvalCtx &eval_ctx = op.get_eval_ctx();
   for (int64_t i = 0; OB_SUCC(ret) && i < ctdef.column_ids_.count(); ++i) {
     bool changed = true;
+    bool cleared = false;
     if (i < ctdef.old_row_.count() && i < ctdef.new_row_.count()) {
       ObDatum *old_datum = NULL;
       ObDatum *new_datum = NULL;
@@ -191,9 +197,10 @@ int collect_changed_ids(ObTableModifyOp &op,
       } else if (OB_FAIL(ctdef.new_row_.at(i)->eval(eval_ctx, new_datum))) {
       } else if (OB_NOT_NULL(old_datum) && OB_NOT_NULL(new_datum)) {
         changed = !ObDatum::binary_equal(*old_datum, *new_datum);
+        cleared = changed && new_datum->is_null();
       }
     }
-    if (OB_SUCC(ret) && changed) {
+    if (OB_SUCC(ret) && changed && (!only_cleared || cleared)) {
       const int64_t written = snprintf(buf + pos, sizeof(buf) - pos, "%s%lu",
                                        first ? "" : ",",
                                        static_cast<unsigned long>(ctdef.column_ids_.at(i)));
@@ -206,7 +213,7 @@ int collect_changed_ids(ObTableModifyOp &op,
     }
   }
   if (OB_SUCC(ret) && pos > 0) {
-    ret = ob_write_string(alloc, ObString(static_cast<int32_t>(pos), buf), changed_ids);
+    ret = ob_write_string(alloc, ObString(static_cast<int32_t>(pos), buf), ids);
   }
   return ret;
 }
@@ -422,10 +429,11 @@ int write_task_rows(ObTableModifyOp &op,
         char action[3072];
         if (ObDmlEventType::DE_UPDATING == event && !pk_moved
             && !ids_intersect(row.changed_column_ids_, meta.dep_column_ids_)
-            && !ids_contain(row.changed_column_ids_, meta.column_id_)) {
-          // Nothing the AI function reads has changed, and the value of the
-          // column itself is untouched. Clearing the column is a request to
-          // compute it again, so that case falls through.
+            && !ids_contain(row.cleared_column_ids_, meta.column_id_)) {
+          // Nothing the AI function reads has changed, and the column itself
+          // was not cleared. Clearing the column is a request to compute it
+          // again, so that case falls through; writing a result into it is
+          // not.
           continue;
         } else if (ObDmlEventType::DE_DELETING == event) {
           snprintf(action, sizeof(action),
@@ -567,7 +575,10 @@ int ObAiColumnRuntime::record_row(ObTableModifyOp &op,
       // The primary key may have moved: the task of the old row has to go.
       if (OB_FAIL(build_rowkey_predicate(op, *table_schema, ctdef, ctdef.old_row_, alloc,
                                          row.old_rowkey_predicate_))) {
-      } else if (OB_FAIL(collect_changed_ids(op, ctdef, alloc, row.changed_column_ids_))) {
+      } else if (OB_FAIL(collect_column_ids(op, ctdef, alloc, false,
+                                            row.changed_column_ids_))) {
+      } else if (OB_FAIL(collect_column_ids(op, ctdef, alloc, true,
+                                            row.cleared_column_ids_))) {
       }
     }
     if (OB_SUCC(ret) && OB_FAIL(pending.push_back(row))) {

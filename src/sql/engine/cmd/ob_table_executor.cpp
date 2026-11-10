@@ -29,6 +29,7 @@
 #include "sql/engine/cmd/ob_ddl_executor_util.h"
 #include "sql/resolver/ddl/ob_create_table_stmt.h"
 #include "sql/resolver/ddl/ob_alter_table_stmt.h"
+#include "sql/engine/dml/ob_ai_column_runtime.h"
 #include "sql/ob_sql_context.h"
 #include "share/schema/ob_schema_getter_guard.h"
 #include "share/schema/ob_table_schema.h"
@@ -832,6 +833,7 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
   ObString first_stmt;
   OZ (stmt.get_first_stmt(first_stmt));
   OV (OB_NOT_NULL(task_exec_ctx = GET_SQL_EXECUTOR_CTX(ctx)), OB_NOT_INIT);
+  ob_ai_trace("[ai] alter exec retry=%d\n", stmt.has_ai_column_retry());
   if (OB_FAIL(ret)) {
     // do nothing
   } else if (stmt.has_ai_column_retry()) {
