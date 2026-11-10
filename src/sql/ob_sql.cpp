@@ -2133,6 +2133,7 @@ int check_one_ai_column(const AiColumnProbe &probe)
   int ret = OB_SUCCESS;
   char sql[1024];
   bool is_ai_column = false;
+  bool has_empty = false;
   snprintf(sql, sizeof(sql),
            "select 1 from oceanbase.__all_ai_column where table_id = %lu "
            "and column_id = %lu limit 1",
@@ -2142,7 +2143,6 @@ int check_one_ai_column(const AiColumnProbe &probe)
   } else if (!is_ai_column) {
     // an ordinary column is readable whatever the session asks for
   } else {
-    bool has_empty = false;
     snprintf(sql, sizeof(sql),
              "select 1 from `%.*s`.`%.*s` where `%.*s` is null limit 1",
              probe.database_name_.length(), probe.database_name_.ptr(),
@@ -2158,11 +2158,10 @@ int check_one_ai_column(const AiColumnProbe &probe)
                      static_cast<unsigned long>(probe.column_id_));
     }
   }
-  if (OB_FAIL(ret)) {
-    ob_ai_trace("[ai] strict column tid=%lu cid=%lu ret=%d\n",
-                static_cast<unsigned long>(probe.table_id_),
-                static_cast<unsigned long>(probe.column_id_), ret);
-  }
+  ob_ai_trace("[ai] strict probe tid=%lu cid=%lu ai=%d empty=%d ret=%d\n",
+              static_cast<unsigned long>(probe.table_id_),
+              static_cast<unsigned long>(probe.column_id_),
+              is_ai_column, has_empty, ret);
   return ret;
 }
 
