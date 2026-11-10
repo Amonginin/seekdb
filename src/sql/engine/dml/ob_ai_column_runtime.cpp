@@ -424,6 +424,11 @@ int write_task_rows(ObTableModifyOp &op,
       const ObDmlEventType event = static_cast<ObDmlEventType>(row.dml_event_);
       const bool pk_moved = (ObDmlEventType::DE_UPDATING == event
                              && 0 != row.rowkey_predicate_.compare(row.old_rowkey_predicate_));
+      ai_trace_impl("[ai] row event=%d changed=`%.*s` cleared=`%.*s` pk_moved=%d\n",
+                    row.dml_event_,
+                    row.changed_column_ids_.length(), row.changed_column_ids_.ptr(),
+                    row.cleared_column_ids_.length(), row.cleared_column_ids_.ptr(),
+                    pk_moved);
       for (int64_t k = 0; OB_SUCC(ret) && k < metas.count(); ++k) {
         const AiColumnMeta &meta = metas.at(k);
         char action[3072];
