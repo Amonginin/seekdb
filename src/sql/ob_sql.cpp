@@ -2050,10 +2050,12 @@ bool find_table_names(ObDMLStmt &stmt,
 {
   bool found = false;
   for (int64_t i = 0; !found && i < stmt.get_table_size(); ++i) {
-    TableItem &item = stmt.get_table_item(i);
-    if (item.get_table_id() == table_id) {
-      database_name = item.get_database_name();
-      table_name = item.get_table_name();
+    TableItem *item = stmt.get_table_item(i);
+    if (OB_NOT_NULL(item) && item->table_id_ == table_id
+        && !item->database_name_.empty() && !item->table_name_.empty()) {
+      // The real names are used, not the alias the statement may give them.
+      database_name = item->database_name_;
+      table_name = item->table_name_;
       found = true;
     }
   }
