@@ -67,7 +67,9 @@ struct AiTaskRow
   AiTaskRow()
     : table_id_(common::OB_INVALID_ID),
       column_id_(common::OB_INVALID_ID),
-      retry_count_(0)
+      retry_count_(0),
+      state_(AI_TASK_PENDING),
+      eligible_ts_(0)
   {}
   uint64_t table_id_;
   uint64_t column_id_;
@@ -77,6 +79,10 @@ struct AiTaskRow
   ObString database_name_;
   ObString table_name_;
   int64_t retry_count_;
+  int64_t state_;
+  // The time the task becomes due, in microseconds since the epoch. Zero
+  // means that it is due right away.
+  int64_t eligible_ts_;
 };
 
 // Doubles the characters that would end a SQL string literal.
@@ -635,7 +641,6 @@ int ObAiColumnWorker::schedule(common::ObTimer &timer)
 
 void ObAiColumnWorker::runTimerTask()
 {
-  ob_ai_trace("[aiw] tick\n");
   int ret = run_once();
   if (OB_FAIL(ret)) {
     ob_ai_trace("[aiw] round failed ret=%d\n", ret);
@@ -652,14 +657,19 @@ int ObAiColumnWorker::run_once()
   // worker does not have to join the system tables. A join of an inner table
   // with the system tables fails with "tablet does not exist" in the session
   // of the server proxy.
+  //
+  // The rows are not filtered here. A task row is removed as soon as it is
+  // done, so every row of the table is a task that still has to be worked on.
+  // The time a task becomes due is compared in C++ instead of in SQL: the
+  // column is a timestamp and the session of the server proxy has a time zone
+  // of its own, which makes the comparison in SQL unreliable.
   snprintf(sql, sizeof(sql),
            "select table_id, request_id, column_id, column_name, rowkey_predicate, "
-           "retry_count, database_name, table_name "
+           "retry_count, database_name, table_name, state, eligible_ts "
            "from %s "
-           "where state in (%d, %d) and (eligible_ts is null or eligible_ts <= now(6)) "
            "order by table_id, request_id, column_id "
            "limit %ld",
-           AI_TASK_TABLE, AI_TASK_PENDING, AI_TASK_RETRYING, MAX_TASKS_PER_ROUND);
+           AI_TASK_TABLE, MAX_TASKS_PER_ROUND);
   ObSEArray<AiTaskRow, 64> rows;
   SMART_VAR(ObMySQLProxy::MySQLResult, res) {
     sqlclient::ObMySQLResult *result = NULL;
@@ -677,6 +687,7 @@ int ObAiColumnWorker::run_once()
         ObString predicate;
         ObString db_name;
         ObString table_name;
+        int64_t eligible_ts = 0;
         if (OB_FAIL(result->get_uint(static_cast<int64_t>(0), row.table_id_))) {
         } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(1), request_id))) {
         } else if (OB_FAIL(result->get_uint(static_cast<int64_t>(2), row.column_id_))) {
@@ -685,12 +696,22 @@ int ObAiColumnWorker::run_once()
         } else if (OB_FAIL(result->get_int(static_cast<int64_t>(5), row.retry_count_))) {
         } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(6), db_name))) {
         } else if (OB_FAIL(result->get_varchar(static_cast<int64_t>(7), table_name))) {
-        } else if (OB_FAIL(ob_write_string(alloc_, request_id, row.request_id_))) {
-        } else if (OB_FAIL(ob_write_string(alloc_, column_name, row.column_name_))) {
-        } else if (OB_FAIL(ob_write_string(alloc_, predicate, row.rowkey_predicate_))) {
-        } else if (OB_FAIL(ob_write_string(alloc_, db_name, row.database_name_))) {
-        } else if (OB_FAIL(ob_write_string(alloc_, table_name, row.table_name_))) {
-        } else if (OB_FAIL(rows.push_back(row))) {
+        } else if (OB_FAIL(result->get_int(static_cast<int64_t>(8), row.state_))) {
+        } else if (OB_FAIL(result->get_datetime(static_cast<int64_t>(9), eligible_ts))) {
+          // A task without a due time is due right away.
+          ret = OB_SUCCESS;
+          eligible_ts = 0;
+        } else {
+          row.eligible_ts_ = eligible_ts;
+        }
+        if (OB_SUCC(ret)) {
+          if (OB_FAIL(ob_write_string(alloc_, request_id, row.request_id_))) {
+          } else if (OB_FAIL(ob_write_string(alloc_, column_name, row.column_name_))) {
+          } else if (OB_FAIL(ob_write_string(alloc_, predicate, row.rowkey_predicate_))) {
+          } else if (OB_FAIL(ob_write_string(alloc_, db_name, row.database_name_))) {
+          } else if (OB_FAIL(ob_write_string(alloc_, table_name, row.table_name_))) {
+          } else if (OB_FAIL(rows.push_back(row))) {
+          }
         }
       }
       if (OB_ITER_END == ret) {
@@ -699,7 +720,28 @@ int ObAiColumnWorker::run_once()
     }
   }
   ob_ai_trace("[aiw] round rows=%ld ret=%d\n", rows.count(), ret);
+  const int64_t now = ObTimeUtility::current_time();
   for (int64_t i = 0; OB_SUCC(ret) && i < rows.count(); ++i) {
+    const AiTaskRow &row = rows.at(i);
+    if (AI_TASK_FAILED == row.state_) {
+      // The task ran out of retries. It is cleaned up here, because the
+      // worker may have died before it could do it.
+      ob_ai_trace("[aiw] drop failed task rid=%.*s\n", row.request_id_.length(),
+                  row.request_id_.ptr());
+      if (OB_FAIL(drop_task(row.table_id_, row.request_id_, row.column_id_))) {
+      }
+      continue;
+    }
+    if (AI_TASK_PENDING != row.state_ && AI_TASK_RETRYING != row.state_) {
+      continue;
+    }
+    if (row.eligible_ts_ > 0 && row.eligible_ts_ > now) {
+      // The task has to wait before it is tried again.
+      continue;
+    }
+    ob_ai_trace("[aiw] task rid=%.*s cid=%lu state=%ld\n", row.request_id_.length(),
+                row.request_id_.ptr(), static_cast<unsigned long>(row.column_id_),
+                row.state_);
     // The rows of one request are neighbours, because the query orders them by
     // the request id.
     bool handled = false;
