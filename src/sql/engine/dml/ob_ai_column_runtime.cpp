@@ -32,6 +32,18 @@ namespace
 
 static const char *AI_TASK_TABLE_NAME = "oceanbase.__all_ai_column_task";
 
+// Depth of the flush of the task rows. The statements the flush runs itself
+// are executed on the same thread, and they must not be recorded again: the
+// update that clears an AI column would otherwise schedule another request
+// while the pending list of the outer statement is being walked.
+thread_local int64_t g_ai_flush_depth = 0;
+
+struct AiFlushGuard
+{
+  AiFlushGuard() { ++g_ai_flush_depth; }
+  ~AiFlushGuard() { --g_ai_flush_depth; }
+};
+
 void ai_trace_impl(const char *fmt, ...)
 {
   const int fd = ::open("/tmp/aidbg.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -396,6 +408,7 @@ int write_task_rows(ObTableModifyOp &op,
                     const ObIArray<AiColumnMeta> &metas)
 {
   int ret = OB_SUCCESS;
+  AiFlushGuard flush_guard;
   // The connection shares the session of the statement, so the task rows join
   // its transaction without a nested session. Saving and restoring the session
   // around every write made the following writes fail with an internal error.
@@ -549,7 +562,10 @@ int ObAiColumnRuntime::record_row(ObTableModifyOp &op,
   share::schema::ObSchemaGetterGuard *schema_guard = NULL;
   const share::schema::ObTableSchema *table_schema = NULL;
   ObSqlCtx *sql_ctx = op.get_exec_ctx().get_sql_ctx();
-  if (is_sys_table(table_id)) {
+  if (g_ai_flush_depth > 0) {
+    // The statement was issued by the flush itself. Recording it would add a
+    // task for a column that is being handled right now.
+  } else if (is_sys_table(table_id)) {
     // AI columns only exist on user tables.
   } else if (OB_ISNULL(sql_ctx) || OB_ISNULL(schema_guard = sql_ctx->schema_guard_)) {
     // Without a schema guard the row key cannot be rendered. The AI column is
