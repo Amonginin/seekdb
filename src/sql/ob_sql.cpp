@@ -2128,38 +2128,50 @@ int query_has_row(const char *sql, bool &has_row)
 // without a result. The definition lives in an inner table, which is also the
 // only place the metadata is fully populated: the array that travels with the
 // table schema is filled on the DDL path only.
-int check_one_ai_column(const AiColumnProbe &probe)
+//
+// The id of the table is looked up by name: the id a column reference carries
+// is a placeholder until the statement is formalized.
+int check_one_ai_column(share::schema::ObSchemaGetterGuard &guard,
+                        const AiColumnProbe &probe)
 {
   int ret = OB_SUCCESS;
   char sql[1024];
+  uint64_t table_id = common::OB_INVALID_ID;
   bool is_ai_column = false;
   bool has_empty = false;
-  snprintf(sql, sizeof(sql),
-           "select 1 from oceanbase.__all_ai_column where table_id = %lu "
-           "and column_id = %lu limit 1",
-           static_cast<unsigned long>(probe.table_id_),
-           static_cast<unsigned long>(probe.column_id_));
-  if (OB_FAIL(query_has_row(sql, is_ai_column))) {
-  } else if (!is_ai_column) {
-    // an ordinary column is readable whatever the session asks for
+  if (OB_FAIL(guard.get_table_id(
+          probe.database_name_, probe.table_name_, false,
+          share::schema::ObSchemaGetterGuard::ALL_NON_HIDDEN_TYPES, table_id))) {
+  } else if (common::OB_INVALID_ID == table_id) {
+    // the table is gone, the statement fails later with its own error
   } else {
     snprintf(sql, sizeof(sql),
-             "select 1 from `%.*s`.`%.*s` where `%.*s` is null limit 1",
-             probe.database_name_.length(), probe.database_name_.ptr(),
-             probe.table_name_.length(), probe.table_name_.ptr(),
-             probe.column_name_.length(), probe.column_name_.ptr());
-    if (OB_FAIL(query_has_row(sql, has_empty))) {
-    } else if (!has_empty) {
-      // every row of the column has a result
+             "select 1 from oceanbase.__all_ai_column where table_id = %lu "
+             "and column_id = %lu limit 1",
+             static_cast<unsigned long>(table_id),
+             static_cast<unsigned long>(probe.column_id_));
+    if (OB_FAIL(query_has_row(sql, is_ai_column))) {
+    } else if (!is_ai_column) {
+      // an ordinary column is readable whatever the session asks for
     } else {
-      ret = OB_AI_COLUMN_NOT_READY;
-      LOG_USER_ERROR(OB_AI_COLUMN_NOT_READY,
-                     static_cast<unsigned long>(probe.table_id_),
-                     static_cast<unsigned long>(probe.column_id_));
+      snprintf(sql, sizeof(sql),
+               "select 1 from `%.*s`.`%.*s` where `%.*s` is null limit 1",
+               probe.database_name_.length(), probe.database_name_.ptr(),
+               probe.table_name_.length(), probe.table_name_.ptr(),
+               probe.column_name_.length(), probe.column_name_.ptr());
+      if (OB_FAIL(query_has_row(sql, has_empty))) {
+      } else if (!has_empty) {
+        // every row of the column has a result
+      } else {
+        ret = OB_AI_COLUMN_NOT_READY;
+        LOG_USER_ERROR(OB_AI_COLUMN_NOT_READY,
+                       static_cast<unsigned long>(table_id),
+                       static_cast<unsigned long>(probe.column_id_));
+      }
     }
   }
   ob_ai_trace("[ai] strict probe tid=%lu cid=%lu ai=%d empty=%d ret=%d\n",
-              static_cast<unsigned long>(probe.table_id_),
+              static_cast<unsigned long>(table_id),
               static_cast<unsigned long>(probe.column_id_),
               is_ai_column, has_empty, ret);
   return ret;
@@ -2174,13 +2186,14 @@ int ObSql::check_ai_column_strict_read(ObSQLSessionInfo &session,
 {
   int ret = OB_SUCCESS;
   bool strict = false;
-  UNUSED(context);
   const int get_ret = session.get_ai_column_strict_read(strict);
   if (OB_FAIL(get_ret)) {
   } else if (!strict) {
     // a session that does not ask for strict reads sees the partial results
   } else if (!ObStmt::is_dml_stmt(stmt.get_stmt_type())) {
     // only a statement that reads a table can reach an AI column
+  } else if (OB_ISNULL(context.schema_guard_)) {
+    ret = OB_ERR_UNEXPECTED;
   } else {
     ObDMLStmt &dml_stmt = static_cast<ObDMLStmt &>(stmt);
     common::ObSEArray<AiColumnProbe, 16> probes;
@@ -2188,7 +2201,7 @@ int ObSql::check_ai_column_strict_read(ObSQLSessionInfo &session,
     }
     ob_ai_trace("[ai] strict probes=%ld ret=%d\n", probes.count(), ret);
     for (int64_t i = 0; OB_SUCC(ret) && i < probes.count(); ++i) {
-      if (OB_FAIL(check_one_ai_column(probes.at(i)))) {
+      if (OB_FAIL(check_one_ai_column(*context.schema_guard_, probes.at(i)))) {
       }
     }
   }
