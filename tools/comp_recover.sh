@@ -243,16 +243,9 @@ stage_build() {
   cd "${SRC_DIR}" || die "找不到 ${SRC_DIR}"
 
   # 拉最新代码。deps/ 是解包出来的依赖，不能跟着覆盖掉。
-  # 用 merge --ff-only 而不是 reset --hard：只有能快进时才移动 HEAD，
+  # merge --ff-only 而不是 reset --hard：只有能快进时才移动 HEAD，
   # 本地有未提交改动时它会拒绝而不是把改动丢掉。
-  git fetch origin 2026-competition 2>&1 | tail -2
-  if ! git merge --ff-only FETCH_HEAD; then
-    die "无法快进到远端提交。本地有分叉或未提交改动，先处理再编译：
-  git status                     # 看是什么挡住了
-  git stash                      # 或先存起来
-  git merge --ff-only FETCH_HEAD"
-  fi
-  git log --oneline -1
+  sync_source || die "同步代码失败，先解决网络或本地改动的问题"
 
   pkill -f "seekdb --base-dir" 2>/dev/null; sleep 2
 
@@ -594,6 +587,39 @@ find_backup() {
   return 1
 }
 
+# 把源码同步到远端最新提交。
+#
+# NAS 上的源码包可能是在别的实例上打的，里面记的 remote 是当时的代理地址，
+# 而那台实例可能已经没了。所以先把 remote 归一化到已知的可用地址，
+# 再 fetch + 快进。fetch 走的是 GitHub，增量只有几十 KB，比 clone 快得多。
+sync_source() {
+  local repo_url="https://gh-proxy.com/https://github.com/Amonginin/seekdb.git"
+  [ -d "${SRC_DIR}/.git" ] || return 0
+
+  # 归一化 remote：包里的地址可能失效或指向别的仓库
+  local cur
+  cur=$( cd "${SRC_DIR}" && git remote get-url origin 2>/dev/null )
+  if [ "${cur}" != "${repo_url}" ]; then
+    info "  修正 origin：${cur:-（空）} → ${repo_url}"
+    ( cd "${SRC_DIR}" && git remote set-url origin "${repo_url}" )
+  fi
+
+  info "  fetch 增量（只拉新提交，比 clone 快得多）"
+  if ! ( cd "${SRC_DIR}" && git fetch origin 2026-competition 2>&1 | tail -2 ); then
+    info "  fetch 失败，可能 GitHub 暂时不通"
+    return 1
+  fi
+
+  # 快进。快进不了说明本地有分叉或未提交改动，不能强行覆盖。
+  if ( cd "${SRC_DIR}" && git merge --ff-only FETCH_HEAD ) 2>/dev/null; then
+    info "  ✓ 已同步到最新"
+  else
+    info "  ! 不能快进（本地有分叉或未提交改动），保持现状："
+    ( cd "${SRC_DIR}" && git status --short | head -5 | sed 's/^/    /' )
+  fi
+  ( cd "${SRC_DIR}" && git log --oneline -1 | sed 's/^/  当前 /' )
+}
+
 stage_restore() {
   log "从 NAS 恢复环境"
 
@@ -601,20 +627,21 @@ stage_restore() {
     die "${NAS_DIR} 不存在"
   fi
 
-  # 1) 源码。已经 clone 过了就保留工作区那份（NAS 里的源码包可能是旧提交，
-  #    而 clone 的一定是 GitHub 上的最新提交），只把分支快进到远端。
+  # 1) 源码。NAS 上的源码包优先：它是完整 git 仓库，解包后 fetch 即可拿到
+  #    最新提交，比 clone 少传 100 多 MB，也不依赖 GitHub 能不能连上。
+  #    clone 只作为兜底（NAS 上没有源码包时）。
   local src_pkg
-  if [ -d "${SRC_DIR}/.git" ]; then
-    info "源码已存在（${SRC_DIR}），快进到远端最新"
-    ( cd "${SRC_DIR}" && git fetch origin 2026-competition 2>&1 | tail -1 )
-    ( cd "${SRC_DIR}" && git merge --ff-only FETCH_HEAD 2>/dev/null ) \
-      || info "  不能快进（本地有改动），保持现状"
-    ( cd "${SRC_DIR}" && git log --oneline -1 | sed 's/^/  /' )
-  elif src_pkg=$(find_backup seekdb_src); then
+  if src_pkg=$(find_backup seekdb_src); then
     info "解包源码：${src_pkg}"
-    [ -d "${SRC_DIR}" ] && mv "${SRC_DIR}" "${SRC_DIR}.old.$(date +%s)"
+    if [ -d "${SRC_DIR}" ]; then
+      mv "${SRC_DIR}" "${SRC_DIR}.old.$(date +%s)"
+    fi
     unpack "${src_pkg}" /tmp || die "源码解包失败"
     info "✓ 源码已恢复"
+    sync_source
+  elif [ -d "${SRC_DIR}/.git" ]; then
+    info "没有源码包，但 ${SRC_DIR} 已有仓库，直接快进"
+    sync_source
   else
     # 2026-11-09 实例到期时源码包没打成，就是走的这条路。
     info "没有源码包，改用 clone（代码在 GitHub 上，不会丢）"
