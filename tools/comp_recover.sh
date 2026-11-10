@@ -262,12 +262,9 @@ stage_build() {
 }
 
 # ---------------------------------------------------------------- test
-stage_test() {
-  log "阶段 3/3：跑测例"
-
-  # mock 服务
-  # 残留的 mock 会占住端口，让新 mock 绑不上而请求打到旧进程上，
-  # 表现为调用超时或"没有收到任何请求"。这里按端口强制回收。
+# 回收所有 mock 进程。残留的 mock 会占住端口，让新 mock 绑不上而请求打到旧
+# 进程上，表现为调用超时或"没有收到任何请求"。
+kill_mocks() {
   pkill -9 -f ai_column_mock.py 2>/dev/null
   pkill -9 -f ai_function_mock.py 2>/dev/null
   for p in 8000 19120 19121 19122 19123 19124; do
@@ -279,14 +276,11 @@ stage_test() {
     done
   done
   sleep 2
-  # 工作目录必须是 tools/deploy：测例里的 --exec 写的是 mysql_test/test_suite/...
-  cd "${SRC_DIR}/tools/deploy" || die "找不到 tools/deploy"
-  python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py start 19120 > "${LOG_DIR}/mock.log" 2>&1
-  python3 mysql_test/test_suite/ai_function/include/ai_function_mock.py start 8000 >> "${LOG_DIR}/mock.log" 2>&1
-  sleep 2
-  info "✓ mock 已启动（ai_column:19120, ai_function:8000）"
+}
 
-  # 起库
+# 干净地起一个实例。用例之间必须隔离：某个用例超时后留下的实例状态会
+# 污染后面的用例，所以每次跑用例前都重新起。
+start_instance() {
   # 上一轮的服务进程必须先停掉：下面会删掉它正在用的数据目录，
   # 留着它还会占住 2881，新实例绑不上端口，测试就会在握手阶段断连。
   pkill -9 -f "observer/seekdb" 2>/dev/null
@@ -367,6 +361,20 @@ stage_test() {
   else
     info "! 未找到 mysql 客户端，跳过建 test 库"
   fi
+}
+
+stage_test() {
+  log "阶段 3/3：跑测例"
+
+  kill_mocks
+  # 工作目录必须是 tools/deploy：测例里的 --exec 写的是 mysql_test/test_suite/...
+  cd "${SRC_DIR}/tools/deploy" || die "找不到 tools/deploy"
+  python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py start 19120 > "${LOG_DIR}/mock.log" 2>&1
+  python3 mysql_test/test_suite/ai_function/include/ai_function_mock.py start 8000 >> "${LOG_DIR}/mock.log" 2>&1
+  sleep 2
+  info "✓ mock 已启动（ai_column:19120, ai_function:8000）"
+
+  start_instance
 
   # 连不上的话再跑测例只会得到一堆无意义的 exit=1，所以在上面直接 die。
 
@@ -378,6 +386,30 @@ stage_test() {
   run_case ai_column ai_column_t1_dml
   run_case ai_column ai_column_vector_index
   run_case ai_column ai_column_worker
+}
+
+# 只跑指定用例，每个用例前重启实例。
+# 用法：bash tools/comp_recover.sh case ai_column/ai_column_t1_dml ai_column/ai_column_worker
+stage_case() {
+  shift
+  log "阶段 4：跑指定用例"
+  if [ $# -eq 0 ]; then
+    die "用法: bash $0 case <套件/用例> [更多...]，例如 case ai_column/ai_column_worker"
+  fi
+
+  kill_mocks
+  cd "${SRC_DIR}/tools/deploy" || die "找不到 tools/deploy"
+
+  for spec in "$@"; do
+    local suite="${spec%%/*}"
+    local case_name="${spec##*/}"
+    if [ "${suite}" = "${spec}" ]; then
+      suite="ai_column"
+    fi
+    # 每个用例都从干净实例开始：上一个用例超时后留下的状态会污染下一个。
+    start_instance
+    run_case "${suite}" "${case_name}"
+  done
 }
 
 run_case() {
@@ -415,6 +447,9 @@ run_case() {
     head -15 "${LOG_DIR}/${suite}_${case_name}.log" | sed 's/^/    /'
     printf '    --- diff ---\n'
     grep -nE "^---|^@@|^<|^>|^[0-9]+:" "${LOG_DIR}/${suite}_${case_name}.log" | head -20 | sed 's/^/    /'
+    # 断言失败发生在哪一条语句，只有尾部看得到。
+    printf '    --- log tail ---\n'
+    tail -30 "${LOG_DIR}/${suite}_${case_name}.log" | sed 's/^/    /'
   fi
   return ${rc}
 }
@@ -424,6 +459,7 @@ case "${STAGE}" in
   deps)  stage_deps ;;
   build) stage_build ;;
   test)  stage_test ;;
+  case)  stage_case "$@" ;;
   all)   stage_deps; stage_build; stage_test ;;
-  *)     echo "用法: bash $0 {check|deps|build|test|all}"; exit 1 ;;
+  *)     echo "用法: bash $0 {check|deps|build|test|all}"; echo "      bash $0 case <套件/用例> [更多...]"; exit 1 ;;
 esac
