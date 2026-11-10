@@ -959,6 +959,11 @@ static const NonReservedKeyword Mysql_none_reserved_keywords[] =
   {"INCONSISTENT", INCONSISTENT},
   {"INDIVIDUAL", INDIVIDUAL},
   {"hybrid_search", HYBRID_SEARCH},
+  {"read_csv", READ_CSV},
+  {"read_json", READ_JSON},
+  {"read_ndjson", READ_NDJSON},
+  {"read_parquet", READ_PARQUET},
+  {"glob", GLOB},
 };
 
 /** https://dev.mysql.com/doc/refman/5.7/en/sql-syntax-prepared-statements.html

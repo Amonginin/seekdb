@@ -16,6 +16,10 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/ob_resolver.h"
+#include "lib/string/ob_sql_string.h"
+#include "sql/parser/ob_parser.h"
+#include "sql/resolver/dml/ob_select_resolver.h"
+#include "sql/resolver/dml/ob_file_table_resolver.h"
 #include "lib/utility/ob_smart_call.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "sql/resolver/cmd/ob_alter_system_resolver.h"
@@ -236,6 +240,32 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       }
       case T_SELECT: {
         REGISTER_SELECT_STMT_RESOLVER(Select);
+        break;
+      }
+      case T_DESCRIBE_SELECT: {
+        // `DESCRIBE SELECT ... FROM read_csv(...)`：
+        // 先用语法树里的文件表函数还原出列元信息，再合成一段 6 列的普通 select
+        const ParseNode *inner_select = real_parse_tree->children_[0];
+        ObSqlString describe_sql;
+        ParseResult describe_result;
+        if (OB_ISNULL(inner_select)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(ob_file_build_describe_sql_from_select(*inner_select,
+                                                                  *params_.allocator_,
+                                                                  describe_sql))) {
+        } else {
+          ObParser parser(*params_.allocator_,
+                          params_.session_info_->get_sql_mode(),
+                          params_.session_info_->get_charsets4parser());
+          if (OB_FAIL(parser.parse(describe_sql.string(), describe_result))) {
+          } else if (OB_ISNULL(describe_result.result_tree_)
+                     || OB_ISNULL(describe_result.result_tree_->children_[0])) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            ret = select_stmt_resolver_func<ObSelectResolver>(
+                params_, *describe_result.result_tree_->children_[0], stmt);
+          }
+        }
         break;
       }
       case T_INSERT: {

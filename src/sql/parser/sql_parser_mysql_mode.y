@@ -294,6 +294,8 @@ END_P SET_VAR DELIMITER
 
         HASH HEAP HELP HISTOGRAM HOUR HIDDEN HYBRID HYBRID_HIST HYBRID_SEARCH
 
+        READ_CSV READ_JSON READ_NDJSON READ_PARQUET GLOB
+
         IDENTIFIED IK_MODE ILOG IMMEDIATE IMPORT INCLUDING INCR INDEXES INFO
         INNODB INPLACE INSERT_METHOD INSTANT INSTANCE INVOKER IO IO_THREAD IPC ISOLATE ISOLATION ISSUER
         INVISIBLE MERGE ISNULL INTERSECT INCREMENTAL INNER_PARSE ILOGCACHE INPUT INDEXED INCONSISTENT INDIVIDUAL
@@ -511,6 +513,8 @@ END_P SET_VAR DELIMITER
 %type <node> column_list_with_boost with_param_column_ref
 %type <node> es_sql_opt
 %type <node> hybrid_search_expr hybrid_search_param
+%type <node> file_table_expr file_table_func file_table_option file_table_option_list file_table_option_value
+%type <node> copy_stmt copy_option copy_option_list describe_select_stmt
 %type <node> vector_similarity_expr vector_similarity_metric
 %type <node> algorithm_opt lock_opt
 %type <node> flush_privileges_stmt opt_flush_privileges_scope
@@ -582,6 +586,8 @@ stmt:
   | drop_table_stmt         { $$ = $1; check_question_mark($$, result); }
   | drop_view_stmt          { $$ = $1; check_question_mark($$, result); }
   | explain_stmt            { $$ = $1; question_mark_issue($$, result); }
+  | describe_select_stmt    { $$ = $1; question_mark_issue($$, result); }
+  | copy_stmt               { $$ = $1; question_mark_issue($$, result); }
   | create_outline_stmt     { $$ = $1; question_mark_issue($$, result); }
   | alter_outline_stmt      { $$ = $1; question_mark_issue($$, result); }
   | drop_outline_stmt       { $$ = $1; check_question_mark($$, result); }
@@ -10896,6 +10902,10 @@ tbl_name
 {
   $$ = $1;
 }
+| file_table_expr
+{
+  $$ = $1;
+}
 ;
 
 tbl_name:
@@ -17518,6 +17528,195 @@ HYBRID_SEARCH '(' literal ',' hybrid_search_param ')'
 | HYBRID_SEARCH '(' literal ',' hybrid_search_param ')' AS relation_name
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_HYBRID_SEARCH_EXPRESSION, 3, $3, $5, $8);
+}
+;
+
+// 文件表函数：read_csv / read_json / read_ndjson / read_parquet / glob
+// value_ 记录格式：1=csv 2=json 3=ndjson 4=parquet 5=glob
+file_table_func:
+READ_CSV
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 1;
+}
+| READ_JSON
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 2;
+}
+| READ_NDJSON
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 3;
+}
+| READ_PARQUET
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 4;
+}
+| GLOB
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 5;
+}
+;
+
+file_table_option_value:
+STRING_VALUE
+{
+  $$ = $1;
+}
+| INTNUM
+{
+  $$ = $1;
+}
+| BOOL_VALUE
+{
+  $$ = $1;
+}
+| '-' INTNUM
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_OP_NEG, 1, $2);
+}
+| NAME_OB
+{
+  $$ = $1;
+}
+;
+
+file_table_option:
+NAME_OB
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, $1, NULL);
+}
+| NAME_OB opt_equal_mark file_table_option_value
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, $1, $3);
+}
+;
+
+file_table_option_list:
+/* empty */
+{
+  $$ = NULL;
+}
+| file_table_option
+{
+  $$ = $1;
+}
+| file_table_option_list ',' file_table_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+file_table_expr:
+file_table_func '(' STRING_VALUE file_table_option_list ')'
+{
+  ParseNode *alias_node = NULL;
+  make_name_node(alias_node, result->malloc_pool_, "");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_READ_FILE_TABLE_EXPRESSION, 3, $3, $4, alias_node);
+  $$->value_ = $1->value_;
+}
+| file_table_func '(' STRING_VALUE file_table_option_list ')' relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_READ_FILE_TABLE_EXPRESSION, 3, $3, $4, $6);
+  $$->value_ = $1->value_;
+}
+| file_table_func '(' STRING_VALUE file_table_option_list ')' AS relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_READ_FILE_TABLE_EXPRESSION, 3, $3, $4, $7);
+  $$->value_ = $1->value_;
+}
+;
+
+// describe select ...：输出 DuckDB 形状的 6 列
+describe_select_stmt:
+DESCRIBE select_stmt
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_DESCRIBE_SELECT, 1, $2);
+}
+| DESC select_stmt
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_DESCRIBE_SELECT, 1, $2);
+}
+;
+
+// copy (query) to 'path' (options)：直接脱糖成 select ... into outfile
+copy_option:
+NAME_OB
+{
+  $$ = $1;
+}
+| NAME_OB NAME_OB
+{
+  $$ = $2;
+}
+| NAME_OB STRING_VALUE
+{
+  $$ = $2;
+}
+| NAME_OB COMP_EQ NAME_OB
+{
+  $$ = $3;
+}
+| NAME_OB COMP_EQ STRING_VALUE
+{
+  $$ = $3;
+}
+| FORMAT NAME_OB
+{
+  $$ = $2;
+}
+| FORMAT STRING_VALUE
+{
+  $$ = $2;
+}
+| FORMAT COMP_EQ NAME_OB
+{
+  $$ = $3;
+}
+| FORMAT COMP_EQ STRING_VALUE
+{
+  $$ = $3;
+}
+;
+
+copy_option_list:
+/* empty */
+{
+  $$ = NULL;
+}
+| copy_option
+{
+  $$ = NULL;
+}
+| copy_option_list ',' copy_option
+{
+  $$ = NULL;
+}
+;
+
+copy_stmt:
+COPY '(' select_no_parens ')' TO STRING_VALUE '(' copy_option_list ')'
+{
+  // 目前只支持 csv：直接合成 format type 节点，其余选项忽略
+  ParseNode *format_name = NULL;
+  ParseNode *format_node = NULL;
+  ParseNode *format_list = NULL;
+  ParseNode *into_node = NULL;
+  (void) $8;
+  make_name_node(format_name, result->malloc_pool_, "csv");
+  malloc_non_terminal_node(format_node, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT_TYPE, 1, format_name);
+  merge_nodes(format_list, result, T_EXTERNAL_FILE_FORMAT, format_node);
+  malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3, $6, format_list, NULL);
+  $$ = $3;
+  if (NULL == $$ || NULL != $$->children_[PARSE_SELECT_INTO_EXTRA]) {
+    yyerror(&@1, result, "");
+    YYERROR;
+  } else {
+    $$->children_[PARSE_SELECT_INTO_EXTRA] = into_node;
+  }
 }
 ;
 

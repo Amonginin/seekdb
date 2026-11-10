@@ -2281,6 +2281,11 @@ typedef enum ObItemType
   T_AI_COLUMN_OPTION = 4923,
   // `ALTER TABLE t RETRY AI COLUMN c [WHERE ...]`
   T_AI_COLUMN_RETRY = 4924,
+  // 文件表函数：`FROM read_csv('path', header = true)`
+  T_READ_FILE_TABLE_EXPRESSION = 4925,
+  T_FILE_TABLE_OPTION = 4926,
+  // `DESCRIBE SELECT ...`：输出 DuckDB 形状的 6 列
+  T_DESCRIBE_SELECT = 4927,
   T_MAX //Attention: add a new type before T_MAX
 } ObItemType;
 
