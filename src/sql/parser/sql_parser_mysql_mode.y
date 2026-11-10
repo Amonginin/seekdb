@@ -17594,6 +17594,14 @@ NAME_OB
   (void) $2;
   malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, $1, $3);
 }
+| FORMAT opt_equal_mark file_table_option_value
+{
+  // format 在词法里是保留 token FORMAT，不是 NAME_OB，必须单独收一条
+  ParseNode *name_node = NULL;
+  (void) $2;
+  make_name_node(name_node, result->malloc_pool_, "format");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, name_node, $3);
+}
 ;
 
 file_table_option_list:
