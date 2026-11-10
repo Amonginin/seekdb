@@ -50,6 +50,28 @@ void ai_trace_impl(const char *fmt, ...)
   }
 }
 
+} // namespace
+
+void ob_ai_trace(const char *fmt, ...)
+{
+  const int fd = ::open("/tmp/aidbg.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+  if (fd >= 0) {
+    char buf[1024];
+    va_list args;
+    va_start(args, fmt);
+    const int len = vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    if (len > 0) {
+      const int to_write = len < static_cast<int>(sizeof(buf)) ? len : static_cast<int>(sizeof(buf));
+      const ssize_t ignored = ::write(fd, buf, static_cast<size_t>(to_write));
+      UNUSED(ignored);
+    }
+    ::close(fd);
+  }
+}
+
+namespace {
+
 // One row of oceanbase.__all_ai_column, in the shape the flush needs.
 struct AiColumnMeta
 {
