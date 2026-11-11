@@ -31,7 +31,7 @@ class ObIKCJKProcessor : public ObIIKProcessor
 public:
   // The main dictionary contains words of at most 16 characters, so no more than 16 prefixes
   // starting at different positions can be alive at the same time. Keep a margin for safety.
-  static const int64_t MAX_HIT_CNT = 32;
+  static constexpr int64_t MAX_HIT_CNT = 32;
   ObIKCJKProcessor(const ObIFTDict &dict_main)
       : hit_cnt_(0), dict_main_(dict_main), cjk_start_(-1), cjk_end_(-1)
   {

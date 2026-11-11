@@ -52,9 +52,9 @@ SELECT 'en_all_mode' AS label,
        tokenize('The quick brown fox jumps over the lazy dog. Full-text search indexing requires efficient tokenization on the hot path.', 'beng', '[{"output_mode":"all"}]') AS tokens;
 SQL
 
-"${MYSQL}" --version >/dev/null 2>&1 || {
-  echo "ERROR: cannot run the client: ${MYSQL}" >&2
+if ! $MYSQL -e "SELECT 1" >/dev/null 2>&1; then
+  echo "ERROR: cannot connect seekdb with: ${MYSQL}" >&2
   exit 1
-}
+fi
 
 $MYSQL < "${SQL_FILE}"
