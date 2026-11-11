@@ -66,6 +66,12 @@ int ObFTSInvChainCache::get(const ObFTSInvChainKey &key,
     }
     break;
   }
+  if (OB_SUCCESS != ret) {
+    ++misses_;
+    if (1 == misses_ % 200) {
+      LOG_INFO("fts inverted chain miss", K_(misses), K_(count));
+    }
+  }
   return ret;
 }
 
@@ -101,7 +107,8 @@ int ObFTSInvChainCache::put(const ObFTSInvChainKey &key,
       if (OB_SUCC(ret)) {
         total_docs_ += doc_ids.count();
         ++count_;
-        LOG_INFO("fts inverted chain cached", K_(count), K_(total_docs));
+        const uint64_t snap = key.snapshot_version_;
+        LOG_INFO("fts inverted chain cached", K_(count), K_(total_docs), K(snap));
       } else {
         chain.doc_ids_.reset();
         chain.relevances_.reset();
@@ -598,6 +605,9 @@ int ObTextRetrievalDaaTTokenIter::init(const ObTextRetrievalScanIterParam &iter_
 
 void ObTextRetrievalDaaTTokenIter::reuse()
 {
+  if (building_chain_) {
+    commit_chain_cache();
+  }
   cur_idx_ = -1;
   count_ = 0;
   cached_cur_idx_ = -1;
@@ -613,6 +623,9 @@ void ObTextRetrievalDaaTTokenIter::reuse()
 
 void ObTextRetrievalDaaTTokenIter::reset()
 {
+  if (building_chain_) {
+    commit_chain_cache();
+  }
   relevance_.reset();
   doc_id_.reset();
   token_iter_->reset();
@@ -636,9 +649,11 @@ int ObTextRetrievalDaaTTokenIter::try_init_chain_cache()
   cache_key_inited_ = true;
   // OB_FAIL expands to `ret = (...)`; this helper deliberately never propagates a
   // cache failure, so compare the return code directly instead of using the macro.
-  if (OB_SUCCESS != token_iter_->get_chain_cache_key(cache_key_)) {
+  const int key_ret = token_iter_->get_chain_cache_key(cache_key_);
+  if (OB_SUCCESS != key_ret) {
     // No usable MVCC version: run the original scan path for this and later tokens.
     cache_usable_ = false;
+    LOG_WARN("fts chain cache key unavailable", K(key_ret));
     return OB_SUCCESS;
   }
   cached_doc_ids_.reset();
@@ -658,6 +673,8 @@ int ObTextRetrievalDaaTTokenIter::try_init_chain_cache()
     building_doc_ids_.reset();
     building_relevances_.reset();
     building_chain_ = true;
+    const uint64_t snap = cache_key_.snapshot_version_;
+    LOG_INFO("fts chain cache building", K(snap), K(cache_ret));
   }
   return OB_SUCCESS;
 }
@@ -688,16 +705,23 @@ void ObTextRetrievalDaaTTokenIter::commit_chain_cache()
   }
   building_chain_ = false;
   int64_t doc_cnt = 0;
-  if (OB_SUCCESS != token_iter_->get_token_doc_cnt(doc_cnt)) {
+  const int cnt_ret = token_iter_->get_token_doc_cnt(doc_cnt);
+  if (OB_SUCCESS != cnt_ret) {
+    LOG_WARN("fts chain cache commit skipped, doc cnt unavailable", K(cnt_ret));
     building_doc_ids_.reset();
     building_relevances_.reset();
     return;
   }
   const double max_rel = token_iter_->get_max_token_relevance();
-  if (OB_SUCCESS != ObFTSInvChainCache::instance().put(
-          cache_key_, building_doc_ids_, building_relevances_, doc_cnt, max_rel)) {
+  const int64_t chain_size = building_doc_ids_.count();
+  const int put_ret = ObFTSInvChainCache::instance().put(
+      cache_key_, building_doc_ids_, building_relevances_, doc_cnt, max_rel);
+  if (OB_SUCCESS != put_ret) {
     // Out of budget: remain correct and simply stop caching new chains.
+    LOG_WARN("fts chain cache put failed", K(put_ret), K(chain_size));
     cache_usable_ = false;
+  } else {
+    LOG_INFO("fts chain cache committed", K(chain_size), K(doc_cnt));
   }
   building_doc_ids_.reset();
   building_relevances_.reset();
@@ -707,6 +731,7 @@ void ObTextRetrievalDaaTTokenIter::commit_chain_cache()
 int ObTextRetrievalDaaTTokenIter::get_next_row() {
   int ret = OB_SUCCESS;
   bool need_load = false;
+  bool last_batch = false;
   (void)try_init_chain_cache();
   if (cache_hit_) {
     ++cached_cur_idx_;
@@ -725,6 +750,7 @@ int ObTextRetrievalDaaTTokenIter::get_next_row() {
     } else if (count_ != 0) {
       ret = OB_SUCCESS;
       need_load = true;
+      last_batch = true;
     }
   } else {
     need_load = true;
@@ -737,6 +763,11 @@ int ObTextRetrievalDaaTTokenIter::get_next_row() {
     }
     if (OB_SUCC(ret)) {
       append_chain_batch();
+      // The final batch arrives with OB_ITER_END from the storage scan. Commit now:
+      // the upper merge iterator may stop before issuing another get_next_row().
+      if (last_batch && building_chain_) {
+        commit_chain_cache();
+      }
     }
   }
   if (OB_ITER_END == ret && building_chain_) {

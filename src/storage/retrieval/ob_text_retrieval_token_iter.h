@@ -103,7 +103,7 @@ public:
           const int64_t token_doc_cnt,
           const double max_token_relevance);
 private:
-  ObFTSInvChainCache() : chains_(), count_(0), total_docs_(0), hits_(0) {}
+  ObFTSInvChainCache() : chains_(), count_(0), total_docs_(0), hits_(0), misses_(0) {}
   static constexpr int64_t MAX_CHAINS = 64;
   static constexpr int64_t MAX_TOTAL_DOCS = 200000;
   lib::ObMutex lock_;
@@ -113,6 +113,7 @@ private:
   int64_t count_;
   int64_t total_docs_;
   int64_t hits_;
+  int64_t misses_;
   DISALLOW_COPY_AND_ASSIGN(ObFTSInvChainCache);
 };
 
