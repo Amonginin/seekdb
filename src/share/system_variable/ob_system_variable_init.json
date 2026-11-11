@@ -2574,8 +2574,8 @@
   "_force_parallel_ddl_dop": {
     "id": 10118,
     "name": "_force_parallel_ddl_dop",
-    "default_value": "1",
-    "base_value": "1",
+    "default_value": "4",
+    "base_value": "4",
     "data_type": "uint",
     "info": "A DDL statement can be parallelized only if you have explicitly enabled parallel DDL in the session or in the SQL statement.",
     "flags": "SESSION | NEED_SERIALIZE | INVISIBLE | INFLUENCE_PLAN",
