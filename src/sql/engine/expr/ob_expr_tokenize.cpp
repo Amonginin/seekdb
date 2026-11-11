@@ -39,6 +39,154 @@ namespace oceanbase
 {
 namespace sql
 {
+namespace
+{
+
+// tokenize() is a pure function of (text, parser, properties, collation): the same bytes always
+// produce the same token document. Documents repeat a lot in real workloads, so keep the last few
+// results per thread and skip tokenizing an input that was already handled.
+class ObTokenizeResultCache final
+{
+public:
+  static const int64_t MAX_ENTRY_CNT = 8;
+  static const int64_t MAX_ARENA_BYTES = 4L * 1024 * 1024;
+
+  int get(const ObString &text,
+          const ObString &parser,
+          const ObString &props,
+          const ObCollationType coll,
+          ObString &result,
+          bool &hit);
+  int put(const ObString &text,
+          const ObString &parser,
+          const ObString &props,
+          const ObCollationType coll,
+          const ObString &result);
+
+private:
+  struct Entry
+  {
+    Entry() : hash_(0), coll_(ObCollationType::CS_TYPE_INVALID) {}
+    uint64_t hash_;
+    ObCollationType coll_;
+    ObString text_;
+    ObString parser_;
+    ObString props_;
+    ObString result_;
+  };
+
+  static uint64_t calc_hash(const ObString &text,
+                            const ObString &parser,
+                            const ObString &props,
+                            const ObCollationType coll);
+  int copy_str(const ObString &src, ObString &dst);
+
+private:
+  ObArenaAllocator alloc_{lib::ObMemAttr("TokResultCache")};
+  Entry entries_[MAX_ENTRY_CNT];
+  int64_t last_ = 0;
+};
+
+uint64_t ObTokenizeResultCache::calc_hash(const ObString &text,
+                                          const ObString &parser,
+                                          const ObString &props,
+                                          const ObCollationType coll)
+{
+  uint64_t hash = text.hash();
+  hash = hash * 131 + parser.hash();
+  hash = hash * 131 + props.hash();
+  hash = hash * 131 + static_cast<uint64_t>(coll);
+  return hash;
+}
+
+int ObTokenizeResultCache::copy_str(const ObString &src, ObString &dst)
+{
+  int ret = OB_SUCCESS;
+  dst.reset();
+  if (!src.empty()) {
+    char *buf = static_cast<char *>(alloc_.alloc(src.length()));
+    if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      MEMCPY(buf, src.ptr(), src.length());
+      dst.assign_ptr(buf, src.length());
+    }
+  }
+  return ret;
+}
+
+int ObTokenizeResultCache::get(const ObString &text,
+                               const ObString &parser,
+                               const ObString &props,
+                               const ObCollationType coll,
+                               ObString &result,
+                               bool &hit)
+{
+  int ret = OB_SUCCESS;
+  const uint64_t hash = calc_hash(text, parser, props, coll);
+  hit = false;
+  for (int64_t i = 0; OB_SUCC(ret) && !hit && i < MAX_ENTRY_CNT; ++i) {
+    Entry &entry = entries_[i];
+    if (entry.hash_ == hash && entry.coll_ == coll && entry.text_ == text
+        && entry.parser_ == parser && entry.props_ == props) {
+      result = entry.result_;
+      hit = true;
+    }
+  }
+  return ret;
+}
+
+int ObTokenizeResultCache::put(const ObString &text,
+                               const ObString &parser,
+                               const ObString &props,
+                               const ObCollationType coll,
+                               const ObString &result)
+{
+  int ret = OB_SUCCESS;
+  const uint64_t hash = calc_hash(text, parser, props, coll);
+  int64_t slot = -1;
+  for (int64_t i = 0; -1 == slot && i < MAX_ENTRY_CNT; ++i) {
+    if (entries_[i].hash_ == hash && entries_[i].coll_ == coll && entries_[i].text_ == text
+        && entries_[i].parser_ == parser && entries_[i].props_ == props) {
+      slot = i;
+    }
+  }
+  if (-1 == slot) {
+    if (alloc_.used() > MAX_ARENA_BYTES) {
+      // Keep the cache bounded: drop everything and start over.
+      alloc_.reset();
+      for (int64_t i = 0; i < MAX_ENTRY_CNT; ++i) {
+        entries_[i] = Entry();
+      }
+      slot = 0;
+    } else {
+      slot = last_++ % MAX_ENTRY_CNT;
+    }
+  }
+  Entry &entry = entries_[slot];
+  entry.hash_ = 0;
+  entry.coll_ = coll;
+  if (OB_FAIL(copy_str(text, entry.text_))) {
+  } else if (OB_FAIL(copy_str(parser, entry.parser_))) {
+  } else if (OB_FAIL(copy_str(props, entry.props_))) {
+  } else if (OB_FAIL(copy_str(result, entry.result_))) {
+  } else {
+    entry.hash_ = hash;
+  }
+  return ret;
+}
+
+ObTokenizeResultCache *get_tokenize_result_cache()
+{
+  static thread_local ObTokenizeResultCache *cache = nullptr;
+  if (OB_ISNULL(cache)) {
+    cache = OB_NEW(ObTokenizeResultCache, "TokResultCache");
+  }
+  return cache;
+}
+
+} // namespace
+
 ObExprTokenize::ObExprTokenize(common::ObIAllocator &alloc)
     : ObStringExprOperator(alloc,
                            T_FUN_TOKENIZE,
@@ -58,18 +206,38 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
   common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
 
   ObIJsonBase *json_result = nullptr;
+  ObString raw_result;
   TokenizeParam param;
+  ObTokenizeResultCache *cache = nullptr;
+  bool cache_hit = false;
+  ObString cached_result;
 
   // check param num, which is checked in ObExprOperator::calc_result_typeN.
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(parse_param(expr, ctx, temp_allocator, param))) {
+  } else if (FALSE_IT(cache = get_tokenize_result_cache())) {
+  } else if (OB_NOT_NULL(cache)
+             && TokenizeParam::OUTPUT_MODE::DEFAULT == param.output_mode_
+             && OB_FAIL(cache->get(param.fulltext_,
+                                   param.parser_name_,
+                                   param.properties_,
+                                   param.meta_.get_collation_type(),
+                                   cached_result,
+                                   cache_hit))) {
+  } else if (cache_hit) {
+    // The exact same text was tokenized before: reuse the packed result.
+    if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, cached_result))) {
+    }
   } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
-  } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
-                                                     ctx,
-                                                     temp_allocator,
-                                                     json_result,
-                                                     expr_datum))) {
+  } else if (OB_FAIL(share::ObJsonWrapper::get_raw_binary(json_result, raw_result, &temp_allocator))) {
+  } else if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, raw_result))) {
+  } else if (OB_NOT_NULL(cache) && TokenizeParam::OUTPUT_MODE::DEFAULT == param.output_mode_
+             && OB_FAIL(cache->put(param.fulltext_,
+                                   param.parser_name_,
+                                   param.properties_,
+                                   param.meta_.get_collation_type(),
+                                   raw_result))) {
   }
 
   return ret;
