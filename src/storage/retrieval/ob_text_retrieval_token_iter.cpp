@@ -376,7 +376,11 @@ int ObTextRetrievalTokenIter::estimate_token_doc_cnt()
   est_param.tx_id_ = inv_idx_agg_param_->tx_id_;
   est_param.schema_version_ = inv_idx_agg_param_->schema_version_;
   est_param.frozen_version_ = GET_BATCH_ROWS_READ_SNAPSHOT_VERSION;
-  if (OB_ISNULL(access_service = ::oceanbase::share::server_service<::oceanbase::storage::ObAccessService>())) {
+  if (OB_ISNULL(relevance_expr_)) {
+    // The BM25 score is not needed, so the document count estimate it relies on is not needed
+    // either. Mark it done so no caller keeps retrying.
+    token_doc_cnt_calculated_ = true;
+  } else if (OB_ISNULL(access_service = ::oceanbase::share::server_service<::oceanbase::storage::ObAccessService>())) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(table_scan_range.init(*inv_idx_agg_param_, batch, allocator))) {
   } else if (OB_FAIL(access_service->estimate_row_count(est_param,

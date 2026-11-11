@@ -138,7 +138,9 @@ public:
     int ret = OB_SUCCESS;
     score = token_iter_->get_max_token_relevance();
     if (OB_UNLIKELY(score < 0.0)) {
-      ret = OB_ERR_UNEXPECTED;
+      // The score is not computed for this scan, so there is no upper bound to prune with. Report
+      // zero, which only makes the block max scan skip pruning instead of failing the query.
+      score = 0.0;
     }
     return ret;
   }

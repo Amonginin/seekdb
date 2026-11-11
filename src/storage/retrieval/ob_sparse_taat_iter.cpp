@@ -257,7 +257,7 @@ int ObSRTaaTIterImpl::fill_chunk_stores()
   } else {
     ObSEArray<ObExpr *, 2> exprs;
     if (OB_FAIL(exprs.push_back(iter_param_->id_proj_expr_))) {
-    } else if (iter_param_->need_project_relevance()
+    } else if (iter_param_->need_project_relevance() && OB_NOT_NULL(iter_param_->relevance_expr_)
         && OB_FAIL(exprs.push_back(iter_param_->relevance_expr_))) {
     }
     ObEvalCtx *eval_ctx = iter_param_->eval_ctx_;
@@ -377,7 +377,7 @@ int ObSRTaaTIterImpl::load_next_hash_map()
 
     ObSEArray<ObExpr *, 2> exprs;
     if (OB_FAIL(exprs.push_back(iter_param_->id_proj_expr_))) {
-    } else if (iter_param_->need_project_relevance()
+    } else if (iter_param_->need_project_relevance() && OB_NOT_NULL(iter_param_->relevance_expr_)
         && OB_FAIL(exprs.push_back(iter_param_->relevance_expr_))) {
     }
     ObEvalCtx *eval_ctx = iter_param_->eval_ctx_;
