@@ -41,7 +41,8 @@ fi
 if [[ "${SKIP_LOAD}" != "1" ]]; then
   log "[1/3] 建表（${DB}.docs，${ROWS} 行）"
   mysql_exec "DROP DATABASE IF EXISTS ${DB}; CREATE DATABASE ${DB};"
-  mysql_exec "USE ${DB}; CREATE TABLE docs (id INT PRIMARY KEY AUTO_INCREMENT, content TEXT, content_en TEXT);"
+  # 用 VARCHAR 而不是 TEXT：TEXT 是 outrow lob，tokenize() 拿到 lob 句柄会报 1210
+  mysql_exec "USE ${DB}; CREATE TABLE docs (id INT PRIMARY KEY AUTO_INCREMENT, content VARCHAR(1024), content_en VARCHAR(1024)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;"
   python3 - "${ROWS}" > /tmp/fts_tok_load.sql <<'PY'
 import sys
 rows = int(sys.argv[1])
