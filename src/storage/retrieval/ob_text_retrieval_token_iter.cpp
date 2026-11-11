@@ -634,7 +634,9 @@ int ObTextRetrievalDaaTTokenIter::try_init_chain_cache()
     return OB_SUCCESS;
   }
   cache_key_inited_ = true;
-  if (OB_FAIL(token_iter_->get_chain_cache_key(cache_key_))) {
+  // OB_FAIL expands to `ret = (...)`; this helper deliberately never propagates a
+  // cache failure, so compare the return code directly instead of using the macro.
+  if (OB_SUCCESS != token_iter_->get_chain_cache_key(cache_key_)) {
     // No usable MVCC version: run the original scan path for this and later tokens.
     cache_usable_ = false;
     return OB_SUCCESS;

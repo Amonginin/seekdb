@@ -39,7 +39,7 @@ class ObBlockMaxScoreIterator;
 // the original storage scan; the cache never becomes a correctness dependency.
 struct ObFTSInvChainKey
 {
-  static const int64_t MAX_TOKEN_LEN = 64;
+  static constexpr int64_t MAX_TOKEN_LEN = 64;
   uint64_t index_id_;
   uint64_t tablet_id_;
   int64_t schema_version_;
@@ -104,8 +104,8 @@ public:
           const double max_token_relevance);
 private:
   ObFTSInvChainCache() : chains_(), count_(0), total_docs_(0), hits_(0) {}
-  static const int64_t MAX_CHAINS = 64;
-  static const int64_t MAX_TOTAL_DOCS = 200000;
+  static constexpr int64_t MAX_CHAINS = 64;
+  static constexpr int64_t MAX_TOTAL_DOCS = 200000;
   lib::ObMutex lock_;
   // Fixed slots: every access is under lock_, so no caller ever holds a pointer
   // into this array and reallocation / dangling references are impossible.
