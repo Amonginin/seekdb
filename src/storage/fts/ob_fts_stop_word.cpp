@@ -164,15 +164,29 @@ int ObAddWord::casedown_word(const ObFTWord &src, ObFTWord &dst)
   if (OB_UNLIKELY(src.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (flag_.casedown()) {
-    ObString dst_str;
-    if (OB_FAIL(ObCharset::tolower(
-                    word_meta_.get_collation_type(),
-                    src.get_word().get_string(),
-                    dst_str,
-                    allocator_))) {
+    // 纯 ASCII 且不含大写字母时，tolower 是恒等变换：省掉一次分配 + 拷贝 + 逐字符折叠。
+    // 只要出现 >= 0x80 的字节（多字节字符）或 A-Z，就仍走原路径，语义不变。
+    const ObString src_str = src.get_word().get_string();
+    bool need_casedown = false;
+    for (int64_t i = 0; !need_casedown && i < src_str.length(); ++i) {
+      const unsigned char c = static_cast<unsigned char>(src_str.ptr()[i]);
+      if (c >= 0x80 || (c >= 'A' && c <= 'Z')) {
+        need_casedown = true;
+      }
+    }
+    if (!need_casedown) {
+      dst = src;
     } else {
-      ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
-      dst = tmp;
+      ObString dst_str;
+      if (OB_FAIL(ObCharset::tolower(
+                      word_meta_.get_collation_type(),
+                      src_str,
+                      dst_str,
+                      allocator_))) {
+      } else {
+        ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
+        dst = tmp;
+      }
     }
   } else {
     dst = src;
