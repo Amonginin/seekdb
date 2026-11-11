@@ -176,6 +176,121 @@ int ObTokenizeResultCache::put(const ObString &text,
   return ret;
 }
 
+// Reformatted parser properties only depend on the parser name and the raw properties, and turning
+// them into their final JSON takes several JSON object operations. Remember the last few results.
+class ObReformPropsCache final
+{
+public:
+  static const int64_t MAX_ENTRY_CNT = 4;
+  static const int64_t MAX_ARENA_BYTES = 1L * 1024 * 1024;
+
+  int get(const ObString &parser, const ObString &raw_props, ObString &reformed, bool &hit);
+  int put(const ObString &parser, const ObString &raw_props, const ObString &reformed);
+
+private:
+  struct Entry
+  {
+    Entry() : hash_(0) {}
+    uint64_t hash_;
+    ObString parser_;
+    ObString raw_props_;
+    ObString reformed_;
+  };
+
+  static uint64_t calc_hash(const ObString &parser, const ObString &raw_props);
+  int copy_str(const ObString &src, ObString &dst);
+
+private:
+  ObArenaAllocator alloc_{lib::ObMemAttr("TokPropsCache")};
+  Entry entries_[MAX_ENTRY_CNT];
+  int64_t last_ = 0;
+};
+
+uint64_t ObReformPropsCache::calc_hash(const ObString &parser, const ObString &raw_props)
+{
+  uint64_t hash = parser.hash();
+  hash = hash * 131 + raw_props.hash();
+  return hash;
+}
+
+int ObReformPropsCache::copy_str(const ObString &src, ObString &dst)
+{
+  int ret = OB_SUCCESS;
+  dst.reset();
+  if (!src.empty()) {
+    char *buf = static_cast<char *>(alloc_.alloc(src.length()));
+    if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      MEMCPY(buf, src.ptr(), src.length());
+      dst.assign_ptr(buf, src.length());
+    }
+  }
+  return ret;
+}
+
+int ObReformPropsCache::get(const ObString &parser,
+                            const ObString &raw_props,
+                            ObString &reformed,
+                            bool &hit)
+{
+  int ret = OB_SUCCESS;
+  const uint64_t hash = calc_hash(parser, raw_props);
+  hit = false;
+  for (int64_t i = 0; !hit && i < MAX_ENTRY_CNT; ++i) {
+    Entry &entry = entries_[i];
+    if (entry.hash_ == hash && entry.parser_ == parser && entry.raw_props_ == raw_props) {
+      reformed = entry.reformed_;
+      hit = true;
+    }
+  }
+  return ret;
+}
+
+int ObReformPropsCache::put(const ObString &parser,
+                            const ObString &raw_props,
+                            const ObString &reformed)
+{
+  int ret = OB_SUCCESS;
+  const uint64_t hash = calc_hash(parser, raw_props);
+  int64_t slot = -1;
+  for (int64_t i = 0; -1 == slot && i < MAX_ENTRY_CNT; ++i) {
+    if (entries_[i].hash_ == hash && entries_[i].parser_ == parser
+        && entries_[i].raw_props_ == raw_props) {
+      slot = i;
+    }
+  }
+  if (-1 == slot) {
+    if (alloc_.used() > MAX_ARENA_BYTES) {
+      alloc_.reset();
+      for (int64_t i = 0; i < MAX_ENTRY_CNT; ++i) {
+        entries_[i] = Entry();
+      }
+      slot = 0;
+    } else {
+      slot = last_++ % MAX_ENTRY_CNT;
+    }
+  }
+  Entry &entry = entries_[slot];
+  entry.hash_ = 0;
+  if (OB_FAIL(copy_str(parser, entry.parser_))) {
+  } else if (OB_FAIL(copy_str(raw_props, entry.raw_props_))) {
+  } else if (OB_FAIL(copy_str(reformed, entry.reformed_))) {
+  } else {
+    entry.hash_ = hash;
+  }
+  return ret;
+}
+
+ObReformPropsCache *get_reform_props_cache()
+{
+  static thread_local ObReformPropsCache *cache = nullptr;
+  if (OB_ISNULL(cache)) {
+    cache = OB_NEW(ObReformPropsCache, "TokPropsCache");
+  }
+  return cache;
+}
+
 ObTokenizeResultCache *get_tokenize_result_cache()
 {
   static thread_local ObTokenizeResultCache *cache = nullptr;
@@ -547,14 +662,22 @@ int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &prop
 {
   int ret = OB_SUCCESS;
   storage::ObFTParserJsonProps parser_properties;
-
-  if (OB_FAIL(parser_properties.init())) {
-  } else if (OB_FAIL(parser_properties.parse_from_valid_str(properties))) {
+  // `properties` may alias properties_, so keep the raw value before it gets replaced below.
+  const ObString raw_props = properties;
+  ObReformPropsCache *cache = get_reform_props_cache();
+  bool hit = false;
+  ObString reformed;
+  if (OB_NOT_NULL(cache) && OB_FAIL(cache->get(parser_name_, raw_props, reformed, hit))) {
+  } else if (hit) {
+    properties_ = reformed;
+  } else if (OB_FAIL(parser_properties.init())) {
+  } else if (OB_FAIL(parser_properties.parse_from_valid_str(raw_props))) {
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "parser properties invalid.");
   } else if (OB_FAIL(parser_properties.rebuild_props_for_ddl(parser_name_,
                                                              ObCollationType::CS_TYPE_UTF8MB4_BIN,
                                                              true))) {
   } else if (OB_FAIL(parser_properties.to_format_json(allocator_, properties_))) {
+  } else if (OB_NOT_NULL(cache) && OB_FAIL(cache->put(parser_name_, raw_props, properties_))) {
   }
 
   return ret;
