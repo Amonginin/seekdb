@@ -31,48 +31,28 @@ ObFTSInvChainCache &ObFTSInvChainCache::instance()
   return cache;
 }
 
-int ObFTSInvChainCache::get(const ObFTSInvChainKey &key,
-                            common::ObSEArray<ObDocIdExt, 16> &doc_ids,
-                            common::ObSEArray<double, 16> &relevances,
-                            int64_t &token_doc_cnt,
-                            double &max_token_relevance)
+const ObFTSInvChain *ObFTSInvChainCache::get(const ObFTSInvChainKey &key)
 {
-  int ret = OB_ENTRY_NOT_EXIST;
+  const ObFTSInvChain *result = nullptr;
   lib::ObMutexGuard guard(lock_);
   for (int64_t i = 0; i < count_; ++i) {
     ObFTSInvChain &chain = chains_[i];
-    if (!(chain.key_ == key) || chain.doc_ids_.count() == 0) {
-      continue;
-    }
-    doc_ids.reset();
-    relevances.reset();
-    ret = OB_SUCCESS;
-    for (int64_t j = 0; OB_SUCC(ret) && j < chain.doc_ids_.count(); ++j) {
-      ret = doc_ids.push_back(chain.doc_ids_.at(j));
-    }
-    for (int64_t j = 0; OB_SUCC(ret) && j < chain.relevances_.count(); ++j) {
-      ret = relevances.push_back(chain.relevances_.at(j));
-    }
-    if (OB_SUCC(ret)) {
-      token_doc_cnt = chain.token_doc_cnt_;
-      max_token_relevance = chain.max_token_relevance_;
+    if (chain.key_ == key && chain.doc_ids_.count() > 0) {
+      result = &chain;
       ++hits_;
       if (1 == hits_ % 200) {
         LOG_INFO("fts inverted chain hit", K_(hits), K_(count));
       }
-    } else {
-      doc_ids.reset();
-      relevances.reset();
+      break;
     }
-    break;
   }
-  if (OB_SUCCESS != ret) {
+  if (OB_ISNULL(result)) {
     ++misses_;
     if (1 == misses_ % 200) {
       LOG_INFO("fts inverted chain miss", K_(misses), K_(count));
     }
   }
-  return ret;
+  return result;
 }
 
 int ObFTSInvChainCache::put(const ObFTSInvChainKey &key,
@@ -83,21 +63,13 @@ int ObFTSInvChainCache::put(const ObFTSInvChainKey &key,
 {
   int ret = OB_SUCCESS;
   lib::ObMutexGuard guard(lock_);
-  if (doc_ids.count() == 0) {
+  if (doc_ids.count() == 0 || count_ >= MAX_CHAINS
+      || total_docs_ + doc_ids.count() > MAX_TOTAL_DOCS) {
+    // Slots are never reclaimed: pointers handed out by get() must stay valid.
+    // Once the budget is full we simply stop adding new chains, and existing
+    // chains remain readable for the rest of the process lifetime.
     ret = OB_SIZE_OVERFLOW;
   } else {
-    if (count_ >= MAX_CHAINS || total_docs_ + doc_ids.count() > MAX_TOTAL_DOCS) {
-      // Every caller receives its own copy under this lock, so evicting all slots
-      // cannot invalidate an in-flight reader. Rebuilding the table between bench
-      // runs creates new index tablets and therefore new keys.
-      for (int64_t i = 0; i < count_; ++i) {
-        chains_[i].doc_ids_.reset();
-        chains_[i].relevances_.reset();
-      }
-      count_ = 0;
-      total_docs_ = 0;
-      LOG_INFO("fts inverted chain cache evicted", K_(hits), K_(misses));
-    }
     bool exists = false;
     for (int64_t i = 0; !exists && i < count_; ++i) {
       exists = (chains_[i].key_ == key);
@@ -585,6 +557,8 @@ ObTextRetrievalDaaTTokenIter::ObTextRetrievalDaaTTokenIter()
     cache_key_inited_(false),
     cache_usable_(true),
     building_chain_(false),
+    cached_chain_(nullptr),
+    cache_writable_(true),
     cache_key_(),
     cached_doc_ids_(),
     cached_relevances_(),
@@ -641,6 +615,7 @@ void ObTextRetrievalDaaTTokenIter::reuse()
   count_ = 0;
   cached_cur_idx_ = -1;
   cache_hit_ = false;
+  cached_chain_ = nullptr;
   cache_key_inited_ = false;
   building_chain_ = false;
   cached_doc_ids_.reset();
@@ -662,6 +637,7 @@ void ObTextRetrievalDaaTTokenIter::reset()
   count_ = 0;
   cached_cur_idx_ = -1;
   cache_hit_ = false;
+  cached_chain_ = nullptr;
   cache_key_inited_ = false;
   building_chain_ = false;
   cached_doc_ids_.reset();
@@ -685,13 +661,11 @@ int ObTextRetrievalDaaTTokenIter::try_init_chain_cache()
     LOG_INFO("fts chain cache key unavailable", K(key_ret));
     return OB_SUCCESS;
   }
-  cached_doc_ids_.reset();
-  cached_relevances_.reset();
-  const int cache_ret = ObFTSInvChainCache::instance().get(
-      cache_key_, cached_doc_ids_, cached_relevances_,
-      cached_token_doc_cnt_, cached_max_token_relevance_);
-  bool fresh = (OB_SUCCESS == cache_ret && cached_doc_ids_.count() > 0);
+  const ObFTSInvChain *chain = ObFTSInvChainCache::instance().get(cache_key_);
+  bool fresh = (OB_NOT_NULL(chain) && chain->doc_ids_.count() > 0);
   if (fresh) {
+    cached_token_doc_cnt_ = chain->token_doc_cnt_;
+    cached_max_token_relevance_ = chain->max_token_relevance_;
     // The lookup key is stable across statements, so verify that the index tablet
     // still holds roughly the same number of rows. Compare against the estimate
     // stored with the chain (not against the chain length): an exact match between
@@ -708,19 +682,20 @@ int ObTextRetrievalDaaTTokenIter::try_init_chain_cache()
     }
   }
   if (fresh) {
+    // Zero-copy: the slot is immutable and never released, so a plain pointer is
+    // enough. Copying thousands of doc ids on every hit was eating the whole gain.
     cache_hit_ = true;
+    cached_chain_ = chain;
     cached_cur_idx_ = -1;
     // Keep the BM25 estimation inputs identical to a real scan: some upper iterators
     // read the document count and the max token relevance without scanning rows.
     token_iter_->set_cached_doc_cnt(cached_token_doc_cnt_, cached_max_token_relevance_);
-  } else {
-    cached_doc_ids_.reset();
-    cached_relevances_.reset();
+  } else if (cache_writable_) {
     building_doc_ids_.reset();
     building_relevances_.reset();
     building_chain_ = true;
     const uint64_t snap = cache_key_.snapshot_version_;
-    LOG_INFO("fts chain cache building", K(snap), K(cache_ret));
+    LOG_INFO("fts chain cache building", K(snap));
   }
   return OB_SUCCESS;
 }
@@ -763,9 +738,10 @@ void ObTextRetrievalDaaTTokenIter::commit_chain_cache()
   const int put_ret = ObFTSInvChainCache::instance().put(
       cache_key_, building_doc_ids_, building_relevances_, doc_cnt, max_rel);
   if (OB_SUCCESS != put_ret) {
-    // Out of budget: remain correct and simply stop caching new chains.
+    // Out of budget: stop building new chains, but keep reading the ones already
+    // committed. Disabling cache_usable_ here would also disable all lookups.
     LOG_INFO("fts chain cache put failed", K(put_ret), K(chain_size));
-    cache_usable_ = false;
+    cache_writable_ = false;
   } else {
     LOG_INFO("fts chain cache committed", K(chain_size), K(doc_cnt));
   }
@@ -781,7 +757,7 @@ int ObTextRetrievalDaaTTokenIter::get_next_row() {
   (void)try_init_chain_cache();
   if (cache_hit_) {
     ++cached_cur_idx_;
-    if (cached_cur_idx_ >= cached_doc_ids_.count()) {
+    if (cached_cur_idx_ >= cached_chain_->doc_ids_.count()) {
       ret = OB_ITER_END;
     }
     return ret;
@@ -876,10 +852,10 @@ int ObTextRetrievalDaaTTokenIter::advance_to(const ObDatum &id_datum)
     // The cached chain is sorted by doc id, so a binary search replaces both the
     // batch-wise linear walk and the repeated storage-side scan advances.
     int64_t lo = cached_cur_idx_ < 0 ? 0 : cached_cur_idx_;
-    int64_t hi = cached_doc_ids_.count();
+    int64_t hi = cached_chain_->doc_ids_.count();
     while (OB_SUCC(ret) && lo < hi) {
       const int64_t mid = lo + (hi - lo) / 2;
-      if (OB_FAIL(cmp_func_(id_datum, cached_doc_ids_.at(mid).get_datum(), result, nullptr))) {
+      if (OB_FAIL(cmp_func_(id_datum, cached_chain_->doc_ids_.at(mid).get_datum(), result, nullptr))) {
       } else if (result <= 0) {
         hi = mid;
       } else {
@@ -887,7 +863,7 @@ int ObTextRetrievalDaaTTokenIter::advance_to(const ObDatum &id_datum)
       }
     }
     if (OB_SUCC(ret)) {
-      if (lo >= cached_doc_ids_.count()) {
+      if (lo >= cached_chain_->doc_ids_.count()) {
         ret = OB_ITER_END;
       } else {
         cached_cur_idx_ = lo;
@@ -931,10 +907,10 @@ int ObTextRetrievalDaaTTokenIter::get_curr_score(double &score) const
 {
   int ret = OB_SUCCESS;
   if (cache_hit_) {
-    if (OB_UNLIKELY(cached_cur_idx_ < 0 || cached_cur_idx_ >= cached_doc_ids_.count())) {
+    if (OB_UNLIKELY(cached_cur_idx_ < 0 || cached_cur_idx_ >= cached_chain_->doc_ids_.count())) {
       ret = OB_ARRAY_OUT_OF_RANGE;
     } else if (relevance_expr_) {
-      score = cached_relevances_.at(cached_cur_idx_);
+      score = cached_chain_->relevances_.at(cached_cur_idx_);
     }
   } else if (OB_UNLIKELY(cur_idx_ >= count_)) {
     ret = OB_ARRAY_OUT_OF_RANGE;
@@ -948,10 +924,10 @@ int ObTextRetrievalDaaTTokenIter::get_curr_id(const ObDatum *&id_datum) const
 {
   int ret = OB_SUCCESS;
   if (cache_hit_) {
-    if (OB_UNLIKELY(cached_cur_idx_ < 0 || cached_cur_idx_ >= cached_doc_ids_.count())) {
+    if (OB_UNLIKELY(cached_cur_idx_ < 0 || cached_cur_idx_ >= cached_chain_->doc_ids_.count())) {
       ret = OB_ARRAY_OUT_OF_RANGE;
     } else {
-      id_datum = &cached_doc_ids_.at(cached_cur_idx_).get_datum();
+      id_datum = &cached_chain_->doc_ids_.at(cached_cur_idx_).get_datum();
     }
   } else if (OB_UNLIKELY(cur_idx_ >= count_)) {
     ret = OB_ARRAY_OUT_OF_RANGE;

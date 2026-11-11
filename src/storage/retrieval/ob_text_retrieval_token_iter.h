@@ -94,11 +94,10 @@ class ObFTSInvChainCache
 {
 public:
   static ObFTSInvChainCache &instance();
-  int get(const ObFTSInvChainKey &key,
-          common::ObSEArray<ObDocIdExt, 16> &doc_ids,
-          common::ObSEArray<double, 16> &relevances,
-          int64_t &token_doc_cnt,
-          double &max_token_relevance);
+  // Returns a pointer to an immutable, never-released chain slot. Slots live in a
+  // fixed array and are filled only while the lock is held, so the pointer stays
+  // valid after unlocking. No per-hit copy is needed.
+  const ObFTSInvChain *get(const ObFTSInvChainKey &key);
   int put(const ObFTSInvChainKey &key,
           const common::ObSEArray<ObDocIdExt, 16> &doc_ids,
           const common::ObSEArray<double, 16> &relevances,
@@ -258,6 +257,8 @@ private:
   bool cache_key_inited_;
   bool cache_usable_;
   bool building_chain_;
+  const ObFTSInvChain *cached_chain_;
+  bool cache_writable_;
   ObFTSInvChainKey cache_key_;
   common::ObSEArray<ObDocIdExt, 16> cached_doc_ids_;
   common::ObSEArray<double, 16> cached_relevances_;
