@@ -12308,8 +12308,18 @@ bool ObLogPlan::select_stmt_uses_match_score(const ObSelectStmt &select_stmt, co
   const ObIArray<ObRawExpr *> &conds = select_stmt.get_condition_exprs();
   for (int64_t i = 0; !used && i < conds.count(); ++i) {
     const ObRawExpr *cond = conds.at(i);
-    used = OB_NOT_NULL(cond) && T_FUN_MATCH_AGAINST != cond->get_expr_type()
-           && expr_contains_match_against(*cond, 0);
+    if (OB_ISNULL(cond)) {
+      // skip
+    } else if (T_FUN_MATCH_AGAINST == cond->get_expr_type()) {
+      // A bare MATCH in the filter only needs its boolean result.
+    } else if (T_OP_BOOL == cond->get_expr_type() && 1 == cond->get_param_count()) {
+      // CAST(MATCH AS BOOLEAN) is still just a filter condition.
+      const ObRawExpr *inner = cond->get_param_expr(0);
+      used = OB_NOT_NULL(inner) && T_FUN_MATCH_AGAINST != inner->get_expr_type()
+             && expr_contains_match_against(*inner, 0);
+    } else {
+      used = expr_contains_match_against(*cond, 0);
+    }
   }
   // The match expression may live in a nested query, so the whole statement tree has to be
   // inspected: the implicit relevance ordering is added to the query that owns the match.
