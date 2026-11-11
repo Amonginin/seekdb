@@ -42,7 +42,7 @@ namespace rootserver
 // word table and the doc rowkey table, so the degree each of them sees is this value divided by
 // three. The ddl parallelism is one when the statement does not ask for one, which leaves the
 // whole build single threaded, so a floor is applied here.
-static constexpr int64_t FTS_BUILD_PARALLELISM = 24;
+static constexpr int64_t FTS_BUILD_PARALLELISM = 12;
 
 /***************         ObFtsIndexBuildTask        *************/
 

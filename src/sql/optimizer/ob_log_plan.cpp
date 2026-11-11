@@ -9290,7 +9290,6 @@ int ObLogPlan::do_post_traverse_processing()
   if (OB_ISNULL(root = get_plan_root())) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(replace_generate_column_exprs(root))) {
-  } else if (OB_FAIL(narrow_text_retrieval_relevance(root, false))) {
   } else if (OB_FAIL(calc_plan_resource())) {
   } else if (OB_FAIL(add_explain_note())) {
   } else { /*do nothing*/ }
@@ -12281,8 +12280,7 @@ bool ObLogPlan::expr_contains_match_against(const ObRawExpr &root, const int32_t
   return found;
 }
 
-bool ObLogPlan::select_stmt_uses_match_score(const ObSelectStmt &select_stmt, const int32_t depth,
-                                             const bool include_order)
+bool ObLogPlan::select_stmt_uses_match_score(const ObSelectStmt &select_stmt, const int32_t depth)
 {
   bool used = false;
   if (depth > 8) {
@@ -12294,7 +12292,7 @@ bool ObLogPlan::select_stmt_uses_match_score(const ObSelectStmt &select_stmt, co
     used = OB_NOT_NULL(item) && expr_contains_match_against(*item, 0);
   }
   const ObIArray<OrderItem> &orders = select_stmt.get_order_items();
-  for (int64_t i = 0; include_order && !used && i < orders.count(); ++i) {
+  for (int64_t i = 0; !used && i < orders.count(); ++i) {
     used = OB_NOT_NULL(orders.at(i).expr_) && expr_contains_match_against(*orders.at(i).expr_, 0);
   }
   const ObIArray<ObRawExpr *> &groups = select_stmt.get_group_exprs();
@@ -12328,7 +12326,7 @@ bool ObLogPlan::select_stmt_uses_match_score(const ObSelectStmt &select_stmt, co
     const TableItem *table_item = table_items.at(i);
     if (OB_NOT_NULL(table_item) && OB_NOT_NULL(table_item->ref_query_)
         && table_item->ref_query_->is_select_stmt()) {
-      used = select_stmt_uses_match_score(*table_item->ref_query_, depth + 1, include_order);
+      used = select_stmt_uses_match_score(*table_item->ref_query_, depth + 1);
     }
   }
   return used;
@@ -12348,7 +12346,7 @@ int ObLogPlan::narrow_text_retrieval_relevance(ObLogicalOperator *op, const bool
   if (OB_ISNULL(stmt) || !stmt->is_select_stmt()) {
     // Keep the previous behavior for anything that is not a plain select.
   } else {
-    used_outside_order = select_stmt_uses_match_score(*static_cast<const ObSelectStmt *>(stmt), 0, false);
+    used_outside_order = select_stmt_uses_match_score(*static_cast<const ObSelectStmt *>(stmt), 0);
   }
   if (OB_ISNULL(op)) {
     ret = OB_ERR_UNEXPECTED;
