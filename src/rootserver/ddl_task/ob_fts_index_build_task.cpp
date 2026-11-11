@@ -38,12 +38,6 @@ namespace oceanbase
 {
 namespace rootserver
 {
-// A fulltext index build splits the requested degree across the inverted index, the forward doc
-// word table and the doc rowkey table, so the degree each of them sees is this value divided by
-// three. The ddl parallelism is one when the statement does not ask for one, which leaves the
-// whole build single threaded, so a floor is applied here.
-static constexpr int64_t FTS_BUILD_PARALLELISM = 12;
-
 /***************         ObFtsIndexBuildTask        *************/
 
 ObFtsIndexBuildTask::ObFtsIndexBuildTask()
@@ -125,9 +119,7 @@ int ObFtsIndexBuildTask::init(
   } else if (OB_FAIL(deep_copy_index_arg(allocator_,
                                          create_index_arg,
                                          create_index_arg_))) {
-  } else if (OB_FAIL(ObFtsIndexBuilderUtil::decide_parallelism(create_index_arg.index_type_,
-                                                              MAX(parallelism, FTS_BUILD_PARALLELISM),
-                                                              parallelism_))) {
+  } else if (OB_FAIL(ObFtsIndexBuilderUtil::decide_parallelism(create_index_arg.index_type_, parallelism, parallelism_))) {
   } else {
     LOG_INFO("create_index_arg.index_type_x", K(create_index_arg.index_type_), K(create_index_arg.index_key_));
 
