@@ -313,6 +313,44 @@ ObExprTokenize::ObExprTokenize(common::ObIAllocator &alloc)
 
 ObExprTokenize::~ObExprTokenize() {}
 
+int ObExprTokenize::build_tokenize_key(const ObExpr &expr,
+                                       ObEvalCtx &ctx,
+                                       ObString &text,
+                                       ObString &parser,
+                                       ObString &props,
+                                       common::ObCollationType &coll)
+{
+  int ret = OB_SUCCESS;
+  ObDatum *text_datum = nullptr;
+  text.reset();
+  parser.reset();
+  props.reset();
+  if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(expr.args_[0]->eval(ctx, text_datum))) {
+  } else {
+    if (!text_datum->is_null()) {
+      text = text_datum->get_string();
+    }
+    coll = expr.args_[0]->obj_meta_.get_collation_type();
+  }
+  if (OB_SUCC(ret) && expr.arg_cnt_ >= 2) {
+    ObDatum *parser_datum = nullptr;
+    if (OB_FAIL(expr.args_[1]->eval(ctx, parser_datum))) {
+    } else if (!parser_datum->is_null()) {
+      parser = parser_datum->get_string().trim();
+    }
+  }
+  if (OB_SUCC(ret) && expr.arg_cnt_ >= 3) {
+    ObDatum *props_datum = nullptr;
+    if (OB_FAIL(expr.args_[2]->eval(ctx, props_datum))) {
+    } else if (!props_datum->is_null()) {
+      props = props_datum->get_string();
+    }
+  }
+  return ret;
+}
+
 int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum)
 {
   int ret = OB_SUCCESS;
@@ -326,33 +364,33 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
   ObTokenizeResultCache *cache = nullptr;
   bool cache_hit = false;
   ObString cached_result;
+  ObString key_text;
+  ObString key_parser;
+  ObString key_props;
+  ObCollationType key_coll = CS_TYPE_INVALID;
 
   // check param num, which is checked in ObExprOperator::calc_result_typeN.
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (OB_FAIL(parse_param(expr, ctx, temp_allocator, param))) {
+  } else if (OB_FAIL(build_tokenize_key(expr, ctx, key_text, key_parser, key_props, key_coll))) {
   } else if (FALSE_IT(cache = get_tokenize_result_cache())) {
   } else if (OB_NOT_NULL(cache)
-             && TokenizeParam::OUTPUT_MODE::DEFAULT == param.output_mode_
-             && OB_FAIL(cache->get(param.fulltext_,
-                                   param.parser_name_,
-                                   param.properties_,
-                                   param.meta_.get_collation_type(),
+             && OB_FAIL(cache->get(key_text,
+                                   key_parser,
+                                   key_props,
+                                   key_coll,
                                    cached_result,
                                    cache_hit))) {
   } else if (cache_hit) {
-    // The exact same text was tokenized before: reuse the packed result.
+    // The exact same input was tokenized before: reuse the packed result.
     if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, cached_result))) {
     }
+  } else if (OB_FAIL(parse_param(expr, ctx, temp_allocator, param))) {
   } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
   } else if (OB_FAIL(share::ObJsonWrapper::get_raw_binary(json_result, raw_result, &temp_allocator))) {
   } else if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, raw_result))) {
   } else if (OB_NOT_NULL(cache) && TokenizeParam::OUTPUT_MODE::DEFAULT == param.output_mode_
-             && OB_FAIL(cache->put(param.fulltext_,
-                                   param.parser_name_,
-                                   param.properties_,
-                                   param.meta_.get_collation_type(),
-                                   raw_result))) {
+             && OB_FAIL(cache->put(key_text, key_parser, key_props, key_coll, raw_result))) {
   }
 
   return ret;

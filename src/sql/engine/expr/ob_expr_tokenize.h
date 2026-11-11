@@ -49,6 +49,17 @@ public:
   int cg_expr(ObExprCGCtx &op_cg_ctx, const ObRawExpr &raw_expr, ObExpr &rt_expr) const override;
 
 private:
+  /**
+   * Collect the raw arguments that fully determine the tokenize result, so that a repeated input
+   * can be answered from the result cache before any normalization work is done.
+   */
+  static int build_tokenize_key(const ObExpr &expr,
+                                ObEvalCtx &ctx,
+                                ObString &text,
+                                ObString &parser,
+                                ObString &props,
+                                common::ObCollationType &coll);
+
   struct TokenizeParam
   {
   public:
