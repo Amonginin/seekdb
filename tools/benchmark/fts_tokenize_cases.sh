@@ -43,13 +43,13 @@ SELECT 'repeat_words' AS label,
        tokenize('数据库数据库索引索引分词 分词 分词', 'ik') AS tokens;
 
 SELECT 'cn_all_mode' AS label,
-       tokenize('中华人民共和国成立了，我们热爱和平与发展。数据库数据库索引索引分词', 'ik', '[{"output_mode":"all"}]') AS tokens;
+       tokenize('中华人民共和国成立了，我们热爱和平与发展。数据库数据库索引索引分词', 'ik', '[{"output":"all"}]') AS tokens;
 
 SELECT 'mixed_all_mode' AS label,
-       tokenize('OceanBase是一款非常稳定的数据库，全文索引的分词器热路径优化。The quick brown fox jumps over the lazy dog.', 'ik', '[{"output_mode":"all"}]') AS tokens;
+       tokenize('OceanBase是一款非常稳定的数据库，全文索引的分词器热路径优化。The quick brown fox jumps over the lazy dog.', 'ik', '[{"output":"all"}]') AS tokens;
 
 SELECT 'en_all_mode' AS label,
-       tokenize('The quick brown fox jumps over the lazy dog. Full-text search indexing requires efficient tokenization on the hot path.', 'beng', '[{"output_mode":"all"}]') AS tokens;
+       tokenize('The quick brown fox jumps over the lazy dog. Full-text search indexing requires efficient tokenization on the hot path.', 'beng', '[{"output":"all"}]') AS tokens;
 SQL
 
 if ! $MYSQL -e "SELECT 1" >/dev/null 2>&1; then
