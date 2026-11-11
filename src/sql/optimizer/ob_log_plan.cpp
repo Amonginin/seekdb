@@ -12315,9 +12315,8 @@ bool ObLogPlan::select_stmt_uses_match_score(const ObSelectStmt &select_stmt, co
   for (int64_t i = 0; !used && i < table_items.count(); ++i) {
     const TableItem *table_item = table_items.at(i);
     if (OB_NOT_NULL(table_item) && OB_NOT_NULL(table_item->ref_query_)
-        && table_item->ref_query()->is_select_stmt()) {
-      const ObSelectStmt *sub_query = static_cast<const ObSelectStmt *>(table_item->ref_query());
-      used = select_stmt_uses_match_score(*sub_query, depth + 1);
+        && table_item->ref_query_->is_select_stmt()) {
+      used = select_stmt_uses_match_score(*table_item->ref_query_, depth + 1);
     }
   }
   return used;
@@ -12330,7 +12329,7 @@ int ObLogPlan::check_need_calc_match_score(bool &need_calc)
 {
   int ret = OB_SUCCESS;
   bool used_as_value = true;
-  ObDMLStmt *stmt = get_stmt();
+  const ObDMLStmt *stmt = get_stmt();
   if (OB_ISNULL(stmt) || !stmt->is_select_stmt()) {
     // Keep the previous behavior for anything that is not a plain select.
   } else {
