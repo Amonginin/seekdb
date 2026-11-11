@@ -26,8 +26,21 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MYSQL="${MYSQL:-mysql -h127.0.0.1 -P2881 -uroot -N -s --default-character-set=utf8mb4}"
-MYSQL_VERBOSE="${MYSQL_VERBOSE:-mysql -h127.0.0.1 -P2881 -uroot --default-character-set=utf8mb4}"
+# 镜像里通常没有 mysql 客户端，只有 obclient：没显式给 MYSQL/MYSQL_VERBOSE 时自己挑一个。
+if [[ -z "${MYSQL:-}" || -z "${MYSQL_VERBOSE:-}" ]]; then
+  if command -v mysql >/dev/null 2>&1; then
+    _default_client="mysql -h127.0.0.1 -P2881 -uroot -N -s --default-character-set=utf8mb4"
+    _default_client_verbose="mysql -h127.0.0.1 -P2881 -uroot --default-character-set=utf8mb4"
+  elif command -v obclient >/dev/null 2>&1; then
+    _default_client="obclient -h127.0.0.1 -P2881 -uroot -N -s --protocol=tcp --default-character-set=utf8mb4"
+    _default_client_verbose="obclient -h127.0.0.1 -P2881 -uroot --protocol=tcp --default-character-set=utf8mb4"
+  else
+    _default_client="mysql -h127.0.0.1 -P2881 -uroot -N -s --default-character-set=utf8mb4"
+    _default_client_verbose="mysql -h127.0.0.1 -P2881 -uroot --default-character-set=utf8mb4"
+  fi
+  MYSQL="${MYSQL:-${_default_client}}"
+  MYSQL_VERBOSE="${MYSQL_VERBOSE:-${_default_client_verbose}}"
+fi
 LABEL="${LABEL:-unknown}"
 ROWS="${ROWS:-20000}"
 BATCH="${BATCH:-500}"
@@ -262,9 +275,10 @@ if [[ ! "${WARMUP}" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-if ! mysql_exec "SELECT 1;" >/dev/null 2>&1; then
-  log "ERROR: cannot connect seekdb. Example:"
-  log "  MYSQL='mysql -h127.0.0.1 -P2881 -uroot --default-character-set=utf8mb4 -N -s' $0"
+if ! conn_err=$(mysql_exec "SELECT 1;" 2>&1); then
+  log "ERROR: cannot connect seekdb（命令：${MYSQL}）"
+  log "  实际报错：${conn_err}"
+  log "  Example: MYSQL='obclient -h127.0.0.1 -P2881 -uroot -N -s --protocol=tcp --default-character-set=utf8mb4' $0"
   exit 1
 fi
 

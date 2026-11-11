@@ -18,7 +18,16 @@
 
 set -euo pipefail
 
-MYSQL="${MYSQL:-mysql -h127.0.0.1 -P2881 -uroot -N -s --default-character-set=utf8mb4}"
+# 镜像里通常没有 mysql 客户端，只有 obclient：没显式给 MYSQL 时自己挑一个。
+if [[ -z "${MYSQL:-}" ]]; then
+  if command -v mysql >/dev/null 2>&1; then
+    MYSQL="mysql -h127.0.0.1 -P2881 -uroot -N -s --default-character-set=utf8mb4"
+  elif command -v obclient >/dev/null 2>&1; then
+    MYSQL="obclient -h127.0.0.1 -P2881 -uroot -N -s --protocol=tcp --default-character-set=utf8mb4"
+  else
+    MYSQL="mysql -h127.0.0.1 -P2881 -uroot -N -s --default-character-set=utf8mb4"
+  fi
+fi
 LABEL="${LABEL:-unknown}"
 ROWS="${ROWS:-20000}"
 ROUNDS="${ROUNDS:-5}"
@@ -32,9 +41,10 @@ now_ns() { date +%s%N; }
 
 mysql_exec() { $MYSQL -e "SET NAMES utf8mb4; SET ob_query_timeout = 100000000000; $1"; }
 
-if ! mysql_exec "SELECT 1;" >/dev/null 2>&1; then
-  log "ERROR: 连不上 seekdb。示例："
-  log "  MYSQL='obclient -h127.0.0.1 -P2881 -uroot -N -s --protocol=tcp --default-character-set=utf8mb4' $0"
+if ! conn_err=$(mysql_exec "SELECT 1;" 2>&1); then
+  log "ERROR: 连不上 seekdb（命令：${MYSQL}）"
+  log "  实际报错：${conn_err}"
+  log "  示例：MYSQL='obclient -h127.0.0.1 -P2881 -uroot -N -s --protocol=tcp --default-character-set=utf8mb4' $0"
   exit 1
 fi
 
