@@ -83,10 +83,21 @@ int ObFTSInvChainCache::put(const ObFTSInvChainKey &key,
 {
   int ret = OB_SUCCESS;
   lib::ObMutexGuard guard(lock_);
-  if (doc_ids.count() == 0 || count_ >= MAX_CHAINS
-      || total_docs_ + doc_ids.count() > MAX_TOTAL_DOCS) {
+  if (doc_ids.count() == 0) {
     ret = OB_SIZE_OVERFLOW;
   } else {
+    if (count_ >= MAX_CHAINS || total_docs_ + doc_ids.count() > MAX_TOTAL_DOCS) {
+      // Every caller receives its own copy under this lock, so evicting all slots
+      // cannot invalidate an in-flight reader. Rebuilding the table between bench
+      // runs creates new index tablets and therefore new keys.
+      for (int64_t i = 0; i < count_; ++i) {
+        chains_[i].doc_ids_.reset();
+        chains_[i].relevances_.reset();
+      }
+      count_ = 0;
+      total_docs_ = 0;
+      LOG_INFO("fts inverted chain cache evicted", K_(hits), K_(misses));
+    }
     bool exists = false;
     for (int64_t i = 0; !exists && i < count_; ++i) {
       exists = (chains_[i].key_ == key);
@@ -158,6 +169,24 @@ void ObTextRetrievalTokenIter::set_cached_doc_cnt(const int64_t doc_cnt, const d
   token_doc_cnt_ = doc_cnt;
   max_token_relevance_ = max_relevance;
   token_doc_cnt_calculated_ = true;
+}
+
+int ObTextRetrievalTokenIter::estimate_chain_row_count(int64_t &row_cnt)
+{
+  int ret = OB_SUCCESS;
+  row_cnt = -1;
+  if (OB_ISNULL(inv_idx_agg_param_) || OB_ISNULL(relevance_expr_)
+      || inv_idx_agg_param_->key_ranges_.count() != 1) {
+    // Without a ready aggregate scan range we cannot count the chain cheaply.
+    // Report it as unverifiable instead of guessing.
+  } else {
+    token_doc_cnt_calculated_ = false;
+    ret = estimate_token_doc_cnt();
+    if (OB_SUCC(ret)) {
+      row_cnt = token_doc_cnt_;
+    }
+  }
+  return ret;
 }
 
 ObTextRetrievalTokenIter::ObTextRetrievalTokenIter()
@@ -653,7 +682,7 @@ int ObTextRetrievalDaaTTokenIter::try_init_chain_cache()
   if (OB_SUCCESS != key_ret) {
     // No usable MVCC version: run the original scan path for this and later tokens.
     cache_usable_ = false;
-    LOG_WARN("fts chain cache key unavailable", K(key_ret));
+    LOG_INFO("fts chain cache key unavailable", K(key_ret));
     return OB_SUCCESS;
   }
   cached_doc_ids_.reset();
@@ -661,7 +690,24 @@ int ObTextRetrievalDaaTTokenIter::try_init_chain_cache()
   const int cache_ret = ObFTSInvChainCache::instance().get(
       cache_key_, cached_doc_ids_, cached_relevances_,
       cached_token_doc_cnt_, cached_max_token_relevance_);
-  if (OB_SUCCESS == cache_ret && cached_doc_ids_.count() > 0) {
+  bool fresh = (OB_SUCCESS == cache_ret && cached_doc_ids_.count() > 0);
+  if (fresh) {
+    // The lookup key is stable across statements, so verify that the index tablet
+    // still holds roughly the same number of rows. Compare against the estimate
+    // stored with the chain (not against the chain length): an exact match between
+    // two different accounting methods would wrongly disable the cache.
+    int64_t live_rows = -1;
+    (void)token_iter_->estimate_chain_row_count(live_rows);
+    if (live_rows > 0 && cached_token_doc_cnt_ > 0) {
+      const int64_t diff = live_rows > cached_token_doc_cnt_
+          ? live_rows - cached_token_doc_cnt_
+          : cached_token_doc_cnt_ - live_rows;
+      if (diff * 4 > cached_token_doc_cnt_) {
+        fresh = false;
+      }
+    }
+  }
+  if (fresh) {
     cache_hit_ = true;
     cached_cur_idx_ = -1;
     // Keep the BM25 estimation inputs identical to a real scan: some upper iterators
@@ -707,7 +753,7 @@ void ObTextRetrievalDaaTTokenIter::commit_chain_cache()
   int64_t doc_cnt = 0;
   const int cnt_ret = token_iter_->get_token_doc_cnt(doc_cnt);
   if (OB_SUCCESS != cnt_ret) {
-    LOG_WARN("fts chain cache commit skipped, doc cnt unavailable", K(cnt_ret));
+    LOG_INFO("fts chain cache commit skipped, doc cnt unavailable", K(cnt_ret));
     building_doc_ids_.reset();
     building_relevances_.reset();
     return;
@@ -718,7 +764,7 @@ void ObTextRetrievalDaaTTokenIter::commit_chain_cache()
       cache_key_, building_doc_ids_, building_relevances_, doc_cnt, max_rel);
   if (OB_SUCCESS != put_ret) {
     // Out of budget: remain correct and simply stop caching new chains.
-    LOG_WARN("fts chain cache put failed", K(put_ret), K(chain_size));
+    LOG_INFO("fts chain cache put failed", K(put_ret), K(chain_size));
     cache_usable_ = false;
   } else {
     LOG_INFO("fts chain cache committed", K(chain_size), K(doc_cnt));

@@ -61,9 +61,11 @@ struct ObFTSInvChainKey
   }
   bool operator==(const ObFTSInvChainKey &other) const
   {
+    // The read snapshot advances on every autocommit statement even when no row changes,
+    // so it must NOT participate in the lookup key. It stays in the struct for logging;
+    // freshness is verified separately against the live inverted-index row count.
     if (index_id_ != other.index_id_ || tablet_id_ != other.tablet_id_
         || schema_version_ != other.schema_version_
-        || snapshot_version_ != other.snapshot_version_
         || token_len_ != other.token_len_) {
       return false;
     }
@@ -169,6 +171,9 @@ public:
   double get_max_token_relevance() const { return max_token_relevance_; }
   int get_chain_cache_key(ObFTSInvChainKey &key) const;
   void set_cached_doc_cnt(const int64_t doc_cnt, const double max_relevance);
+  // Re-estimate the number of rows in the current token's inverted chain without
+  // scanning them. Used to prove a cached chain is still fresh under a new snapshot.
+  int estimate_chain_row_count(int64_t &row_cnt);
 private:
   int init_calc_exprs_in_relevance_expr();
   void clear_batch_wise_evaluated_flag(const int64_t count);
