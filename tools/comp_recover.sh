@@ -29,12 +29,31 @@ DEVTOOLS="${SRC_DIR}/deps/3rd/usr/local/oceanbase/devtools"
 export PATH="${DEVTOOLS}/bin:${PATH}"
 
 # ---------------------------------------------------------------- check
+# save_full 是三段式：先写 <out>.part，成功才 mv 成 <out> 并落 <out>.done 标记。
+# 所以判断「有没有跑完」只看标记文件，不要去猜 tar 进程是否还在。
+save_full_state() {
+  local out="${NAS_DIR}/build_release.tar.gz"
+  if [ -f "${out}.done" ] && [ -f "${out}" ]; then
+    printf '  ✓ 完成：%s（%s）\n' "${out}" "$(du -h "${out}" 2>/dev/null | awk '{print $1}')"
+  elif pgrep -f "tar -cf - -C ${SRC_DIR} build_release" >/dev/null 2>&1; then
+    printf '  … 进行中：%s.part（已写 %s）\n' "${out}" \
+      "$(du -h "${out}.part" 2>/dev/null | awk '{print $1}')"
+  elif [ -f "${out}.part" ]; then
+    printf '  ✗ 中断：%s.part 残留但没有 .done，重跑 save_full\n' "${out}"
+  else
+    printf '  - 未跑过\n'
+  fi
+}
+
 stage_check() {
   log "体检"
 
   info "--- NAS 备份（${NAS_DIR}）---"
   if [ -d "${NAS_DIR}" ]; then
-    ls -lh "${NAS_DIR}"/*.tgz 2>/dev/null || info "(没有 tgz 备份)"
+    ls -lh "${NAS_DIR}"/*.tgz "${NAS_DIR}"/*.tar.gz "${NAS_DIR}"/*.tar.zst 2>/dev/null \
+      || info "(没有备份包)"
+    info "save_full:"
+    save_full_state
     df -h "${NAS_DIR}" 2>/dev/null | tail -1
   else
     info "${NAS_DIR} 不存在（不是魔搭 DSW？）"
@@ -690,6 +709,8 @@ stage_save_full() {
     && mv '${out}.part' '${out}' && echo DONE > '${out}.done'" \
     > "${LOG_DIR}/save_full.log" 2>&1 &
   info "✓ 后台任务 pid=$!（${NCPU} 核）"
+  info "查进度：bash $0 check   （看 build_release.tar.gz 状态）"
+  info "完成标志：${out}.done 出现；中途按 Ctrl-C 不会产生 .done，重跑即可"
 }
 
 # ---------------------------------------------------------------- restore
