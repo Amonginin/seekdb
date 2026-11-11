@@ -9290,6 +9290,7 @@ int ObLogPlan::do_post_traverse_processing()
   if (OB_ISNULL(root = get_plan_root())) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(replace_generate_column_exprs(root))) {
+  } else if (OB_FAIL(narrow_text_retrieval_relevance(root, false))) {
   } else if (OB_FAIL(calc_plan_resource())) {
   } else if (OB_FAIL(add_explain_note())) {
   } else { /*do nothing*/ }
@@ -12280,7 +12281,8 @@ bool ObLogPlan::expr_contains_match_against(const ObRawExpr &root, const int32_t
   return found;
 }
 
-bool ObLogPlan::select_stmt_uses_match_score(const ObSelectStmt &select_stmt, const int32_t depth)
+bool ObLogPlan::select_stmt_uses_match_score(const ObSelectStmt &select_stmt, const int32_t depth,
+                                             const bool include_order)
 {
   bool used = false;
   if (depth > 8) {
@@ -12292,7 +12294,7 @@ bool ObLogPlan::select_stmt_uses_match_score(const ObSelectStmt &select_stmt, co
     used = OB_NOT_NULL(item) && expr_contains_match_against(*item, 0);
   }
   const ObIArray<OrderItem> &orders = select_stmt.get_order_items();
-  for (int64_t i = 0; !used && i < orders.count(); ++i) {
+  for (int64_t i = 0; include_order && !used && i < orders.count(); ++i) {
     used = OB_NOT_NULL(orders.at(i).expr_) && expr_contains_match_against(*orders.at(i).expr_, 0);
   }
   const ObIArray<ObRawExpr *> &groups = select_stmt.get_group_exprs();
@@ -12306,8 +12308,18 @@ bool ObLogPlan::select_stmt_uses_match_score(const ObSelectStmt &select_stmt, co
   const ObIArray<ObRawExpr *> &conds = select_stmt.get_condition_exprs();
   for (int64_t i = 0; !used && i < conds.count(); ++i) {
     const ObRawExpr *cond = conds.at(i);
-    used = OB_NOT_NULL(cond) && T_FUN_MATCH_AGAINST != cond->get_expr_type()
-           && expr_contains_match_against(*cond, 0);
+    if (OB_ISNULL(cond)) {
+      // skip
+    } else if (T_FUN_MATCH_AGAINST == cond->get_expr_type()) {
+      // A bare MATCH in the filter only needs its boolean result.
+    } else if (T_OP_BOOL == cond->get_expr_type() && 1 == cond->get_param_count()) {
+      // CAST(MATCH AS BOOLEAN) is still just a filter condition.
+      const ObRawExpr *inner = cond->get_param_expr(0);
+      used = OB_NOT_NULL(inner) && T_FUN_MATCH_AGAINST != inner->get_expr_type()
+             && expr_contains_match_against(*inner, 0);
+    } else {
+      used = expr_contains_match_against(*cond, 0);
+    }
   }
   // The match expression may live in a nested query, so the whole statement tree has to be
   // inspected: the implicit relevance ordering is added to the query that owns the match.
@@ -12316,7 +12328,7 @@ bool ObLogPlan::select_stmt_uses_match_score(const ObSelectStmt &select_stmt, co
     const TableItem *table_item = table_items.at(i);
     if (OB_NOT_NULL(table_item) && OB_NOT_NULL(table_item->ref_query_)
         && table_item->ref_query_->is_select_stmt()) {
-      used = select_stmt_uses_match_score(*table_item->ref_query_, depth + 1);
+      used = select_stmt_uses_match_score(*table_item->ref_query_, depth + 1, include_order);
     }
   }
   return used;
@@ -12325,6 +12337,42 @@ bool ObLogPlan::select_stmt_uses_match_score(const ObSelectStmt &select_stmt, co
 // The BM25 score is expensive: it needs the per token document counts and one evaluation per
 // candidate row. A MATCH used as a plain filter only needs its boolean result, so the score is
 // only required when the statement reads it as a value.
+// The implicit relevance ordering is added to every statement that filters on MATCH, but the
+// optimizer drops it when nothing consumes the order (an aggregate, for example). In that case the
+// score is dead code and only the boolean match result is needed.
+int ObLogPlan::narrow_text_retrieval_relevance(ObLogicalOperator *op, const bool sort_above)
+{
+  int ret = OB_SUCCESS;
+  const ObDMLStmt *stmt = get_stmt();
+  bool used_outside_order = true;
+  if (OB_ISNULL(stmt) || !stmt->is_select_stmt()) {
+    // Keep the previous behavior for anything that is not a plain select.
+  } else {
+    used_outside_order = select_stmt_uses_match_score(*static_cast<const ObSelectStmt *>(stmt), 0, false);
+  }
+  if (OB_ISNULL(op)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (!used_outside_order) {
+    const auto type = op->get_type();
+    const bool sorted = sort_above || log_op_def::LOG_SORT == type || log_op_def::LOG_TOPK == type;
+    if (log_op_def::LOG_TABLE_SCAN == type) {
+      ObLogTableScan *scan = static_cast<ObLogTableScan *>(op);
+      ObTextRetrievalInfo &tr_info = scan->get_text_retrieval_info();
+      // sort_key_ is filled from the statement order even when no ordering operator survives, so
+      // only a pushed down topk (which is executed by the scan) keeps the score alive here.
+      if (OB_NOT_NULL(tr_info.match_expr_) && tr_info.need_calc_relevance_
+          && nullptr == tr_info.topk_limit_expr_ && !sorted) {
+        tr_info.need_calc_relevance_ = false;
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < op->get_num_of_child(); ++i) {
+      if (OB_FAIL(narrow_text_retrieval_relevance(op->get_child(i), sorted))) {
+      }
+    }
+  }
+  return ret;
+}
+
 int ObLogPlan::check_need_calc_match_score(bool &need_calc)
 {
   int ret = OB_SUCCESS;
