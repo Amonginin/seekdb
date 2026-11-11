@@ -849,24 +849,48 @@ int ObTextRetrievalDaaTTokenIter::advance_to(const ObDatum &id_datum)
   bool find = false;
 
   if (cache_hit_) {
-    // The cached chain is sorted by doc id, so a binary search replaces both the
+    // The cached chain is sorted by doc id, so a lower_bound replaces both the
     // batch-wise linear walk and the repeated storage-side scan advances.
+    //
+    // The merge above this iterator walks the chain forward, so almost every call
+    // asks for the id at (or immediately after) the position we already stopped on.
+    // Probing those two slots first turns the common case into a single comparison,
+    // while a full binary search would burn ~log2(n) indirect cmp_func_ calls per
+    // row -- which used to be the dominant cost of a cached COUNT(*).
+    const int64_t chain_cnt = cached_chain_->doc_ids_.count();
     int64_t lo = cached_cur_idx_ < 0 ? 0 : cached_cur_idx_;
-    int64_t hi = cached_chain_->doc_ids_.count();
-    while (OB_SUCC(ret) && lo < hi) {
-      const int64_t mid = lo + (hi - lo) / 2;
-      if (OB_FAIL(cmp_func_(id_datum, cached_chain_->doc_ids_.at(mid).get_datum(), result, nullptr))) {
-      } else if (result <= 0) {
-        hi = mid;
-      } else {
-        lo = mid + 1;
+    if (lo >= chain_cnt) {
+      ret = OB_ITER_END;
+    } else if (OB_FAIL(cmp_func_(id_datum, cached_chain_->doc_ids_.at(lo).get_datum(), result, nullptr))) {
+    } else if (result <= 0) {
+      // lower_bound over [lo, n) is lo itself.
+      cached_cur_idx_ = lo;
+    } else if (++lo >= chain_cnt) {
+      ret = OB_ITER_END;
+    } else if (OB_FAIL(cmp_func_(id_datum, cached_chain_->doc_ids_.at(lo).get_datum(), result, nullptr))) {
+    } else if (result <= 0) {
+      // chain[lo - 1] < id_datum <= chain[lo]
+      cached_cur_idx_ = lo;
+    } else {
+      // Jumped further ahead than one row: fall back to a real binary search on the
+      // remaining range. It is only reached on sparse chains / non-monotonic probes.
+      int64_t hi = chain_cnt;
+      ++lo;
+      while (OB_SUCC(ret) && lo < hi) {
+        const int64_t mid = lo + (hi - lo) / 2;
+        if (OB_FAIL(cmp_func_(id_datum, cached_chain_->doc_ids_.at(mid).get_datum(), result, nullptr))) {
+        } else if (result <= 0) {
+          hi = mid;
+        } else {
+          lo = mid + 1;
+        }
       }
-    }
-    if (OB_SUCC(ret)) {
-      if (lo >= cached_chain_->doc_ids_.count()) {
-        ret = OB_ITER_END;
-      } else {
-        cached_cur_idx_ = lo;
+      if (OB_SUCC(ret)) {
+        if (lo >= chain_cnt) {
+          ret = OB_ITER_END;
+        } else {
+          cached_cur_idx_ = lo;
+        }
       }
     }
     return ret;
