@@ -12280,6 +12280,49 @@ bool ObLogPlan::expr_contains_match_against(const ObRawExpr &root, const int32_t
   return found;
 }
 
+bool ObLogPlan::select_stmt_uses_match_score(const ObSelectStmt &select_stmt, const int32_t depth)
+{
+  bool used = false;
+  if (depth > 8) {
+    return false;
+  }
+  // A MATCH that is only a filter condition does not need the score, but any other use of it does.
+  for (int64_t i = 0; !used && i < select_stmt.get_select_item_size(); ++i) {
+    const ObRawExpr *item = select_stmt.get_select_item(i).expr_;
+    used = OB_NOT_NULL(item) && expr_contains_match_against(*item, 0);
+  }
+  const ObIArray<OrderItem> &orders = select_stmt.get_order_items();
+  for (int64_t i = 0; !used && i < orders.count(); ++i) {
+    used = OB_NOT_NULL(orders.at(i).expr_) && expr_contains_match_against(*orders.at(i).expr_, 0);
+  }
+  const ObIArray<ObRawExpr *> &groups = select_stmt.get_group_exprs();
+  for (int64_t i = 0; !used && i < groups.count(); ++i) {
+    used = OB_NOT_NULL(groups.at(i)) && expr_contains_match_against(*groups.at(i), 0);
+  }
+  const ObIArray<ObRawExpr *> &havings = select_stmt.get_having_exprs();
+  for (int64_t i = 0; !used && i < havings.count(); ++i) {
+    used = OB_NOT_NULL(havings.at(i)) && expr_contains_match_against(*havings.at(i), 0);
+  }
+  const ObIArray<ObRawExpr *> &conds = select_stmt.get_condition_exprs();
+  for (int64_t i = 0; !used && i < conds.count(); ++i) {
+    const ObRawExpr *cond = conds.at(i);
+    used = OB_NOT_NULL(cond) && T_FUN_MATCH_AGAINST != cond->get_expr_type()
+           && expr_contains_match_against(*cond, 0);
+  }
+  // The match expression may live in a nested query, so the whole statement tree has to be
+  // inspected: the implicit relevance ordering is added to the query that owns the match.
+  const ObIArray<TableItem *> &table_items = select_stmt.get_table_items();
+  for (int64_t i = 0; !used && i < table_items.count(); ++i) {
+    const TableItem *table_item = table_items.at(i);
+    if (OB_NOT_NULL(table_item) && OB_NOT_NULL(table_item->ref_query_)
+        && table_item->ref_query()->is_select_stmt()) {
+      const ObSelectStmt *sub_query = static_cast<const ObSelectStmt *>(table_item->ref_query());
+      used = select_stmt_uses_match_score(*sub_query, depth + 1);
+    }
+  }
+  return used;
+}
+
 // The BM25 score is expensive: it needs the per token document counts and one evaluation per
 // candidate row. A MATCH used as a plain filter only needs its boolean result, so the score is
 // only required when the statement reads it as a value.
@@ -12291,33 +12334,7 @@ int ObLogPlan::check_need_calc_match_score(bool &need_calc)
   if (OB_ISNULL(stmt) || !stmt->is_select_stmt()) {
     // Keep the previous behavior for anything that is not a plain select.
   } else {
-    ObSelectStmt *select_stmt = static_cast<ObSelectStmt *>(stmt);
-    used_as_value = false;
-    for (int64_t i = 0; !used_as_value && i < select_stmt->get_select_item_size(); ++i) {
-      const ObRawExpr *item = select_stmt->get_select_item(i).expr_;
-      used_as_value = OB_NOT_NULL(item) && expr_contains_match_against(*item, 0);
-    }
-    ObIArray<ObRawExpr *> &havings = select_stmt->get_having_exprs();
-    for (int64_t i = 0; !used_as_value && i < havings.count(); ++i) {
-      used_as_value = OB_NOT_NULL(havings.at(i)) && expr_contains_match_against(*havings.at(i), 0);
-    }
-    ObIArray<OrderItem> &orders = select_stmt->get_order_items();
-    for (int64_t i = 0; !used_as_value && i < orders.count(); ++i) {
-      used_as_value = OB_NOT_NULL(orders.at(i).expr_)
-                      && expr_contains_match_against(*orders.at(i).expr_, 0);
-    }
-    ObIArray<ObRawExpr *> &groups = select_stmt->get_group_exprs();
-    for (int64_t i = 0; !used_as_value && i < groups.count(); ++i) {
-      used_as_value = OB_NOT_NULL(groups.at(i)) && expr_contains_match_against(*groups.at(i), 0);
-    }
-    // A bare MATCH in the filter list is a boolean condition; any other filter touching the match
-    // expression (MATCH(..) AGAINST(..) > 0.5 for instance) needs the score.
-    ObIArray<ObRawExpr *> &conds = select_stmt->get_condition_exprs();
-    for (int64_t i = 0; !used_as_value && i < conds.count(); ++i) {
-      ObRawExpr *cond = conds.at(i);
-      used_as_value = OB_NOT_NULL(cond) && T_FUN_MATCH_AGAINST != cond->get_expr_type()
-                      && expr_contains_match_against(*cond, 0);
-    }
+    used_as_value = select_stmt_uses_match_score(*static_cast<const ObSelectStmt *>(stmt), 0);
   }
   need_calc = used_as_value;
   return ret;
