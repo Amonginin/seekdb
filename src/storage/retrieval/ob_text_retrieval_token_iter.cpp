@@ -25,6 +25,134 @@ namespace oceanbase
 {
 namespace storage
 {
+ObFTSInvChainCache &ObFTSInvChainCache::instance()
+{
+  static ObFTSInvChainCache cache;
+  return cache;
+}
+
+int ObFTSInvChainCache::get(const ObFTSInvChainKey &key,
+                            common::ObSEArray<ObDocIdExt, 16> &doc_ids,
+                            common::ObSEArray<double, 16> &relevances,
+                            int64_t &token_doc_cnt,
+                            double &max_token_relevance)
+{
+  int ret = OB_ENTRY_NOT_EXIST;
+  lib::ObMutexGuard guard(lock_);
+  for (int64_t i = 0; i < count_; ++i) {
+    ObFTSInvChain &chain = chains_[i];
+    if (!(chain.key_ == key) || chain.doc_ids_.count() == 0) {
+      continue;
+    }
+    doc_ids.reset();
+    relevances.reset();
+    ret = OB_SUCCESS;
+    for (int64_t j = 0; OB_SUCC(ret) && j < chain.doc_ids_.count(); ++j) {
+      ret = doc_ids.push_back(chain.doc_ids_.at(j));
+    }
+    for (int64_t j = 0; OB_SUCC(ret) && j < chain.relevances_.count(); ++j) {
+      ret = relevances.push_back(chain.relevances_.at(j));
+    }
+    if (OB_SUCC(ret)) {
+      token_doc_cnt = chain.token_doc_cnt_;
+      max_token_relevance = chain.max_token_relevance_;
+      ++hits_;
+      if (1 == hits_ % 200) {
+        LOG_INFO("fts inverted chain hit", K_(hits), K_(count));
+      }
+    } else {
+      doc_ids.reset();
+      relevances.reset();
+    }
+    break;
+  }
+  return ret;
+}
+
+int ObFTSInvChainCache::put(const ObFTSInvChainKey &key,
+                            const common::ObSEArray<ObDocIdExt, 16> &doc_ids,
+                            const common::ObSEArray<double, 16> &relevances,
+                            const int64_t token_doc_cnt,
+                            const double max_token_relevance)
+{
+  int ret = OB_SUCCESS;
+  lib::ObMutexGuard guard(lock_);
+  if (doc_ids.count() == 0 || count_ >= MAX_CHAINS
+      || total_docs_ + doc_ids.count() > MAX_TOTAL_DOCS) {
+    ret = OB_SIZE_OVERFLOW;
+  } else {
+    bool exists = false;
+    for (int64_t i = 0; !exists && i < count_; ++i) {
+      exists = (chains_[i].key_ == key);
+    }
+    if (!exists) {
+      ObFTSInvChain &chain = chains_[count_];
+      chain.key_ = key;
+      chain.token_doc_cnt_ = token_doc_cnt;
+      chain.max_token_relevance_ = max_token_relevance;
+      chain.doc_ids_.reset();
+      chain.relevances_.reset();
+      for (int64_t j = 0; OB_SUCC(ret) && j < doc_ids.count(); ++j) {
+        ret = chain.doc_ids_.push_back(doc_ids.at(j));
+      }
+      for (int64_t j = 0; OB_SUCC(ret) && j < relevances.count(); ++j) {
+        ret = chain.relevances_.push_back(relevances.at(j));
+      }
+      if (OB_SUCC(ret)) {
+        total_docs_ += doc_ids.count();
+        ++count_;
+        LOG_INFO("fts inverted chain cached", K_(count), K_(total_docs));
+      } else {
+        chain.doc_ids_.reset();
+        chain.relevances_.reset();
+      }
+    }
+  }
+  return ret;
+}
+
+int ObTextRetrievalTokenIter::get_chain_cache_key(ObFTSInvChainKey &key) const
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(inv_idx_scan_param_) || inv_idx_scan_param_->key_ranges_.count() != 1) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (!inv_idx_scan_param_->snapshot_.valid_
+             || !inv_idx_scan_param_->snapshot_.version().is_valid_and_not_min()
+             || 0 == inv_idx_scan_param_->snapshot_.version().get_val_for_sql()) {
+    // Without a real MVCC snapshot we cannot prove the chain is still valid.
+    ret = OB_NOT_SUPPORTED;
+  } else {
+    const ObNewRange &range = inv_idx_scan_param_->key_ranges_.at(0);
+    const ObObj *obj_ptr = range.start_key_.get_obj_ptr();
+    if (OB_ISNULL(obj_ptr)) {
+      ret = OB_INVALID_ARGUMENT;
+    } else {
+      ObString token = obj_ptr[0].get_string();
+      if (token.length() <= 0 || token.length() > ObFTSInvChainKey::MAX_TOKEN_LEN) {
+        ret = OB_NOT_SUPPORTED;
+      } else {
+        key.reset();
+        key.index_id_ = inv_idx_scan_param_->index_id_;
+        key.tablet_id_ = inv_idx_scan_param_->tablet_id_.id();
+        key.schema_version_ = inv_idx_scan_param_->schema_version_;
+        key.snapshot_version_ = inv_idx_scan_param_->snapshot_.version().get_val_for_sql();
+        key.token_len_ = static_cast<int32_t>(token.length());
+        for (int64_t i = 0; i < token.length(); ++i) {
+          key.token_[i] = token.ptr()[i];
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+void ObTextRetrievalTokenIter::set_cached_doc_cnt(const int64_t doc_cnt, const double max_relevance)
+{
+  token_doc_cnt_ = doc_cnt;
+  max_token_relevance_ = max_relevance;
+  token_doc_cnt_calculated_ = true;
+}
+
 ObTextRetrievalTokenIter::ObTextRetrievalTokenIter()
   : ObISparseRetrievalDimIter(),
     mem_context_(nullptr),
@@ -417,6 +545,18 @@ ObTextRetrievalDaaTTokenIter::ObTextRetrievalDaaTTokenIter()
     relevance_(),
     doc_id_(),
     cmp_func_(nullptr),
+    cache_hit_(false),
+    cache_key_inited_(false),
+    cache_usable_(true),
+    building_chain_(false),
+    cache_key_(),
+    cached_doc_ids_(),
+    cached_relevances_(),
+    building_doc_ids_(),
+    building_relevances_(),
+    cached_cur_idx_(-1),
+    cached_token_doc_cnt_(0),
+    cached_max_token_relevance_(-1.0),
     is_inited_(false)
 {
 }
@@ -460,6 +600,14 @@ void ObTextRetrievalDaaTTokenIter::reuse()
 {
   cur_idx_ = -1;
   count_ = 0;
+  cached_cur_idx_ = -1;
+  cache_hit_ = false;
+  cache_key_inited_ = false;
+  building_chain_ = false;
+  cached_doc_ids_.reset();
+  cached_relevances_.reset();
+  building_doc_ids_.reset();
+  building_relevances_.reset();
   token_iter_->reuse();
 }
 
@@ -470,12 +618,101 @@ void ObTextRetrievalDaaTTokenIter::reset()
   token_iter_->reset();
   cur_idx_ = -1;
   count_ = 0;
+  cached_cur_idx_ = -1;
+  cache_hit_ = false;
+  cache_key_inited_ = false;
+  building_chain_ = false;
+  cached_doc_ids_.reset();
+  cached_relevances_.reset();
+  building_doc_ids_.reset();
+  building_relevances_.reset();
+}
+
+int ObTextRetrievalDaaTTokenIter::try_init_chain_cache()
+{
+  if (cache_key_inited_ || !cache_usable_) {
+    return OB_SUCCESS;
+  }
+  cache_key_inited_ = true;
+  if (OB_FAIL(token_iter_->get_chain_cache_key(cache_key_))) {
+    // No usable MVCC version: run the original scan path for this and later tokens.
+    cache_usable_ = false;
+    return OB_SUCCESS;
+  }
+  cached_doc_ids_.reset();
+  cached_relevances_.reset();
+  const int cache_ret = ObFTSInvChainCache::instance().get(
+      cache_key_, cached_doc_ids_, cached_relevances_,
+      cached_token_doc_cnt_, cached_max_token_relevance_);
+  if (OB_SUCCESS == cache_ret && cached_doc_ids_.count() > 0) {
+    cache_hit_ = true;
+    cached_cur_idx_ = -1;
+    // Keep the BM25 estimation inputs identical to a real scan: some upper iterators
+    // read the document count and the max token relevance without scanning rows.
+    token_iter_->set_cached_doc_cnt(cached_token_doc_cnt_, cached_max_token_relevance_);
+  } else {
+    cached_doc_ids_.reset();
+    cached_relevances_.reset();
+    building_doc_ids_.reset();
+    building_relevances_.reset();
+    building_chain_ = true;
+  }
+  return OB_SUCCESS;
+}
+
+void ObTextRetrievalDaaTTokenIter::append_chain_batch()
+{
+  if (!building_chain_) {
+    return;
+  }
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < count_; ++i) {
+    ret = building_doc_ids_.push_back(doc_id_[i]);
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < count_; ++i) {
+    ret = building_relevances_.push_back(OB_NOT_NULL(relevance_expr_) ? relevance_[i] : 0.0);
+  }
+  if (OB_FAIL(ret)) {
+    building_chain_ = false;
+    building_doc_ids_.reset();
+    building_relevances_.reset();
+  }
+}
+
+void ObTextRetrievalDaaTTokenIter::commit_chain_cache()
+{
+  if (!building_chain_) {
+    return;
+  }
+  building_chain_ = false;
+  int64_t doc_cnt = 0;
+  if (OB_SUCCESS != token_iter_->get_token_doc_cnt(doc_cnt)) {
+    building_doc_ids_.reset();
+    building_relevances_.reset();
+    return;
+  }
+  const double max_rel = token_iter_->get_max_token_relevance();
+  if (OB_SUCCESS != ObFTSInvChainCache::instance().put(
+          cache_key_, building_doc_ids_, building_relevances_, doc_cnt, max_rel)) {
+    // Out of budget: remain correct and simply stop caching new chains.
+    cache_usable_ = false;
+  }
+  building_doc_ids_.reset();
+  building_relevances_.reset();
 }
 
 // Sparse Retrieval Dimension Iter Interfaces
 int ObTextRetrievalDaaTTokenIter::get_next_row() {
   int ret = OB_SUCCESS;
   bool need_load = false;
+  (void)try_init_chain_cache();
+  if (cache_hit_) {
+    ++cached_cur_idx_;
+    if (cached_cur_idx_ >= cached_doc_ids_.count()) {
+      ret = OB_ITER_END;
+    }
+    return ret;
+  }
   if (OB_LIKELY((++cur_idx_) < count_)) {
   } else if (!eval_ctx_->is_vectorized() && (OB_FAIL(token_iter_->get_next_row()))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
@@ -496,6 +733,12 @@ int ObTextRetrievalDaaTTokenIter::get_next_row() {
       }
     } else if (OB_FAIL(save_docids())) {
     }
+    if (OB_SUCC(ret)) {
+      append_chain_batch();
+    }
+  }
+  if (OB_ITER_END == ret && building_chain_) {
+    commit_chain_cache();
   }
   return ret;
 }
@@ -550,6 +793,30 @@ int ObTextRetrievalDaaTTokenIter::advance_to(const ObDatum &id_datum)
   int result = 0;
   bool find = false;
 
+  if (cache_hit_) {
+    // The cached chain is sorted by doc id, so a binary search replaces both the
+    // batch-wise linear walk and the repeated storage-side scan advances.
+    int64_t lo = cached_cur_idx_ < 0 ? 0 : cached_cur_idx_;
+    int64_t hi = cached_doc_ids_.count();
+    while (OB_SUCC(ret) && lo < hi) {
+      const int64_t mid = lo + (hi - lo) / 2;
+      if (OB_FAIL(cmp_func_(id_datum, cached_doc_ids_.at(mid).get_datum(), result, nullptr))) {
+      } else if (result <= 0) {
+        hi = mid;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    if (OB_SUCC(ret)) {
+      if (lo >= cached_doc_ids_.count()) {
+        ret = OB_ITER_END;
+      } else {
+        cached_cur_idx_ = lo;
+      }
+    }
+    return ret;
+  }
+
   if (cur_idx_ < 0) {
     ret = OB_ERR_UNEXPECTED;
   }
@@ -584,7 +851,13 @@ int ObTextRetrievalDaaTTokenIter::advance_to(const ObDatum &id_datum)
 int ObTextRetrievalDaaTTokenIter::get_curr_score(double &score) const
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(cur_idx_ >= count_)) {
+  if (cache_hit_) {
+    if (OB_UNLIKELY(cached_cur_idx_ < 0 || cached_cur_idx_ >= cached_doc_ids_.count())) {
+      ret = OB_ARRAY_OUT_OF_RANGE;
+    } else if (relevance_expr_) {
+      score = cached_relevances_.at(cached_cur_idx_);
+    }
+  } else if (OB_UNLIKELY(cur_idx_ >= count_)) {
     ret = OB_ARRAY_OUT_OF_RANGE;
   } else if (relevance_expr_) {
     score = relevance_[cur_idx_];
@@ -595,7 +868,13 @@ int ObTextRetrievalDaaTTokenIter::get_curr_score(double &score) const
 int ObTextRetrievalDaaTTokenIter::get_curr_id(const ObDatum *&id_datum) const
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(cur_idx_ >= count_)) {
+  if (cache_hit_) {
+    if (OB_UNLIKELY(cached_cur_idx_ < 0 || cached_cur_idx_ >= cached_doc_ids_.count())) {
+      ret = OB_ARRAY_OUT_OF_RANGE;
+    } else {
+      id_datum = &cached_doc_ids_.at(cached_cur_idx_).get_datum();
+    }
+  } else if (OB_UNLIKELY(cur_idx_ >= count_)) {
     ret = OB_ARRAY_OUT_OF_RANGE;
   } else {
     id_datum = &doc_id_[cur_idx_].get_datum();

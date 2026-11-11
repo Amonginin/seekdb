@@ -18,6 +18,7 @@
 #define OB_TEXT_RETRIEVAL_TOKEN_ITER_H_
 
 #include "lib/container/ob_se_array.h"
+#include "lib/lock/ob_mutex.h"
 #include "query/engine/expr/ob_expr.h"
 #include "ob_block_max_iter.h"
 #include "ob_i_sparse_retrieval_iter.h"
@@ -31,6 +32,90 @@ namespace storage
 {
 class ObTableScanParam;
 class ObBlockMaxScoreIterator;
+
+// A read-only cache of one inverted chain (one token of one index tablet).
+// The key carries the read snapshot version, so a committed write advances the
+// version and makes the stale chain unreachable. Any miss or error falls back to
+// the original storage scan; the cache never becomes a correctness dependency.
+struct ObFTSInvChainKey
+{
+  static const int64_t MAX_TOKEN_LEN = 64;
+  uint64_t index_id_;
+  uint64_t tablet_id_;
+  int64_t schema_version_;
+  uint64_t snapshot_version_;
+  int32_t token_len_;
+  char token_[MAX_TOKEN_LEN];
+
+  ObFTSInvChainKey() { reset(); }
+  void reset()
+  {
+    index_id_ = 0;
+    tablet_id_ = 0;
+    schema_version_ = -1;
+    snapshot_version_ = 0;
+    token_len_ = 0;
+    for (int64_t i = 0; i < MAX_TOKEN_LEN; ++i) {
+      token_[i] = 0;
+    }
+  }
+  bool operator==(const ObFTSInvChainKey &other) const
+  {
+    if (index_id_ != other.index_id_ || tablet_id_ != other.tablet_id_
+        || schema_version_ != other.schema_version_
+        || snapshot_version_ != other.snapshot_version_
+        || token_len_ != other.token_len_) {
+      return false;
+    }
+    for (int64_t i = 0; i < token_len_; ++i) {
+      if (token_[i] != other.token_[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+};
+
+struct ObFTSInvChain
+{
+  ObFTSInvChainKey key_;
+  common::ObSEArray<ObDocIdExt, 16> doc_ids_;
+  common::ObSEArray<double, 16> relevances_;
+  int64_t token_doc_cnt_;
+  double max_token_relevance_;
+
+  ObFTSInvChain()
+    : key_(), doc_ids_(), relevances_(), token_doc_cnt_(0), max_token_relevance_(-1.0) {}
+};
+
+class ObFTSInvChainCache
+{
+public:
+  static ObFTSInvChainCache &instance();
+  int get(const ObFTSInvChainKey &key,
+          common::ObSEArray<ObDocIdExt, 16> &doc_ids,
+          common::ObSEArray<double, 16> &relevances,
+          int64_t &token_doc_cnt,
+          double &max_token_relevance);
+  int put(const ObFTSInvChainKey &key,
+          const common::ObSEArray<ObDocIdExt, 16> &doc_ids,
+          const common::ObSEArray<double, 16> &relevances,
+          const int64_t token_doc_cnt,
+          const double max_token_relevance);
+private:
+  ObFTSInvChainCache() : chains_(), count_(0), total_docs_(0), hits_(0) {}
+  static const int64_t MAX_CHAINS = 64;
+  static const int64_t MAX_TOTAL_DOCS = 200000;
+  lib::ObMutex lock_;
+  // Fixed slots: every access is under lock_, so no caller ever holds a pointer
+  // into this array and reallocation / dangling references are impossible.
+  ObFTSInvChain chains_[MAX_CHAINS];
+  int64_t count_;
+  int64_t total_docs_;
+  int64_t hits_;
+  DISALLOW_COPY_AND_ASSIGN(ObFTSInvChainCache);
+};
+
 struct ObTextRetrievalScanIterParam
 {
   ObTextRetrievalScanIterParam()
@@ -81,6 +166,8 @@ public:
   sql::ObBitVector *get_skip() { return skip_; }
   int get_token_doc_cnt(int64_t &token_doc_cnt) const;
   double get_max_token_relevance() const { return max_token_relevance_; }
+  int get_chain_cache_key(ObFTSInvChainKey &key) const;
+  void set_cached_doc_cnt(const int64_t doc_cnt, const double max_relevance);
 private:
   int init_calc_exprs_in_relevance_expr();
   void clear_batch_wise_evaluated_flag(const int64_t count);
@@ -147,6 +234,9 @@ public:
 private:
   int save_relevances_and_docids();
   int save_docids();
+  int try_init_chain_cache();
+  void append_chain_batch();
+  void commit_chain_cache();
   ObArenaAllocator *allocator_;
   ObTextRetrievalTokenIter *token_iter_;
   sql::ObEvalCtx *eval_ctx_;
@@ -158,6 +248,18 @@ private:
   ObFixedArray<double, ObIAllocator> relevance_; // when ~ObFixedArray(), wikll destory itself
   ObFixedArray<ObDocIdExt, ObIAllocator> doc_id_;
   common::ObDatumCmpFuncType cmp_func_;
+  bool cache_hit_;
+  bool cache_key_inited_;
+  bool cache_usable_;
+  bool building_chain_;
+  ObFTSInvChainKey cache_key_;
+  common::ObSEArray<ObDocIdExt, 16> cached_doc_ids_;
+  common::ObSEArray<double, 16> cached_relevances_;
+  common::ObSEArray<ObDocIdExt, 16> building_doc_ids_;
+  common::ObSEArray<double, 16> building_relevances_;
+  int64_t cached_cur_idx_;
+  int64_t cached_token_doc_cnt_;
+  double cached_max_token_relevance_;
   bool is_inited_;
   DISALLOW_COPY_AND_ASSIGN(ObTextRetrievalDaaTTokenIter);
 };
