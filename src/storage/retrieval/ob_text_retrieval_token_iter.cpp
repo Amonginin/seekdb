@@ -965,6 +965,9 @@ int ObTextRetrievalBlockMaxIter::init(
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(token_iter_.init(iter_param))) {
   } else {
+    // The block-max walk needs the storage-side score statistics for pruning.
+    // A replayed chain has none, so keep this path on the original scan.
+    token_iter_.disable_chain_cache();
     curr_id_ = nullptr;
     block_max_iter_param_ = &block_max_iter_param;
     block_max_scan_param_ = &scan_param;

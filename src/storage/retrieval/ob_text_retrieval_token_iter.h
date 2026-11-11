@@ -226,6 +226,10 @@ public:
   virtual int get_curr_id(const ObDatum *&id_datum) const override;
 public:
   int get_token_doc_cnt(int64_t &token_doc_cnt) const { return token_iter_->get_token_doc_cnt(token_doc_cnt); }
+  // BlockMax/topk prunes candidates with storage-level block max scores. Replaying
+  // a cached chain removes that information and makes the topk path slower, so the
+  // caller disables the cache for this dimension iterator.
+  void disable_chain_cache() { cache_usable_ = false; }
   virtual int get_dim_max_score(double &score) override {
     int ret = OB_SUCCESS;
     score = token_iter_->get_max_token_relevance();
