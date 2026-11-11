@@ -46,7 +46,8 @@ public:
         cache_stop_(allocator),
         dict_main_(nullptr),
         dict_quan_(nullptr),
-        dict_stop_(nullptr)
+        dict_stop_(nullptr),
+        dict_from_cache_(false)
   {
   }
 
@@ -72,21 +73,13 @@ private:
                        const ObFTCharUtil::CharType type);
 
 private:
-  int init_dict(const ObFTParserParam &param);
-
-  int init_single_dict(ObFTDictDesc desc, ObFTCacheRangeContainer &container);
+  int init_dict();
 
   int init_segmenter(const ObFTParserParam &param);
 
   int init_ctx(const ObFTParserParam &param);
 
   void reset();
-
-  bool should_read_newest_table() const;
-
-  int build_dict_from_cache(const ObFTDictDesc &desc,
-                            ObFTCacheRangeContainer &container,
-                            ObIFTDict *&dict);
 
 private:
   static constexpr int SEGMENT_LIMIT = 1000;
@@ -106,6 +99,9 @@ private:
   ObIFTDict *dict_main_;
   ObIFTDict *dict_quan_;
   ObIFTDict *dict_stop_;
+  // The dictionaries may point into a thread local cache shared by every parser instance; such
+  // dictionaries are borrowed and must not be destroyed by this parser.
+  bool dict_from_cache_;
 
   DISABLE_COPY_ASSIGN(ObIKFTParser);
 };
