@@ -12325,42 +12325,6 @@ bool ObLogPlan::select_stmt_uses_match_score(const ObSelectStmt &select_stmt, co
 // The BM25 score is expensive: it needs the per token document counts and one evaluation per
 // candidate row. A MATCH used as a plain filter only needs its boolean result, so the score is
 // only required when the statement reads it as a value.
-// The implicit relevance ordering is added to every statement that filters on MATCH, but the
-// optimizer drops it when nothing consumes the order (an aggregate, for example). In that case the
-// score is dead code and only the boolean match result is needed.
-int ObLogPlan::narrow_text_retrieval_relevance(ObLogicalOperator *op, const bool sort_above)
-{
-  int ret = OB_SUCCESS;
-  const ObDMLStmt *stmt = get_stmt();
-  bool used_outside_order = true;
-  if (OB_ISNULL(stmt) || !stmt->is_select_stmt()) {
-    // Keep the previous behavior for anything that is not a plain select.
-  } else {
-    used_outside_order = select_stmt_uses_match_score(*static_cast<const ObSelectStmt *>(stmt), 0);
-  }
-  if (OB_ISNULL(op)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (!used_outside_order) {
-    const auto type = op->get_type();
-    const bool sorted = sort_above || log_op_def::LOG_SORT == type || log_op_def::LOG_TOPK == type;
-    if (log_op_def::LOG_TABLE_SCAN == type) {
-      ObLogTableScan *scan = static_cast<ObLogTableScan *>(op);
-      ObTextRetrievalInfo &tr_info = scan->get_text_retrieval_info();
-      // sort_key_ is filled from the statement order even when no ordering operator survives, so
-      // only a pushed down topk (which is executed by the scan) keeps the score alive here.
-      if (OB_NOT_NULL(tr_info.match_expr_) && tr_info.need_calc_relevance_
-          && nullptr == tr_info.topk_limit_expr_ && !sorted) {
-        tr_info.need_calc_relevance_ = false;
-      }
-    }
-    for (int64_t i = 0; OB_SUCC(ret) && i < op->get_num_of_child(); ++i) {
-      if (OB_FAIL(narrow_text_retrieval_relevance(op->get_child(i), sorted))) {
-      }
-    }
-  }
-  return ret;
-}
-
 int ObLogPlan::check_need_calc_match_score(bool &need_calc)
 {
   int ret = OB_SUCCESS;

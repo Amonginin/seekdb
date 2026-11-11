@@ -96,7 +96,7 @@ void ObTextRetrievalTokenIter::reset()
 
 void ObTextRetrievalTokenIter::reuse()
 {
-  if (inv_idx_agg_cache_mode_ && OB_NOT_NULL(inv_idx_agg_param_) && !inv_idx_agg_param_->need_switch_param_) {
+  if (inv_idx_agg_cache_mode_ && !inv_idx_agg_param_->need_switch_param_) {
     // do nothing
   } else {
     token_doc_cnt_calculated_ = false;
@@ -246,7 +246,6 @@ int ObTextRetrievalTokenIter::get_next_batch(const int64_t capacity, int64_t &co
   } else if (OB_FAIL(query::das_scan_next_rows(
                  inv_idx_scan_iter_, count, OB_MIN(max_batch_size_, capacity)))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
-      LOG_WARN("failed to scan inverted index rows", K(ret), K_(token_doc_cnt));
     } else if (count != 0) {
       ret = OB_SUCCESS;
     }
@@ -527,7 +526,6 @@ int ObTextRetrievalDaaTTokenIter::save_docids()
   int ret = OB_SUCCESS;
   if (OB_ISNULL(inv_scan_domain_id_col_)) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("inv_scan_domain_id_col is null when saving docids", K(ret));
   } else {
     cur_idx_ = 0;
     const ObDatumVector &doc_id_datum = inv_scan_domain_id_col_->locate_expr_datumvector(*eval_ctx_);

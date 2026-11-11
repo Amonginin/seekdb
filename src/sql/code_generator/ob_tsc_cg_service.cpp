@@ -3058,14 +3058,7 @@ int ObTscCgService::generate_text_ir_spec_exprs(const ObTextRetrievalInfo &tr_in
   }
 
   if (OB_SUCC(ret) && (tr_info.need_calc_relevance_ || nullptr != tr_info.pushdown_match_filter_)) {
-    // The raw match expression evaluates to the bm25 score, which is only available when the
-    // relevance inputs are generated. Without them the boolean match filter is projected instead,
-    // which is all a filter only consumer needs.
-    ObRawExpr *relevance_proj_raw = tr_info.need_calc_relevance_
-        ? tr_info.match_expr_ : tr_info.pushdown_match_filter_;
-    if (OB_ISNULL(relevance_proj_raw)) {
-      ret = OB_ERR_UNEXPECTED;
-    } else if (OB_FAIL(cg_.generate_rt_expr(*relevance_proj_raw,
+    if (OB_FAIL(cg_.generate_rt_expr(*tr_info.match_expr_,
                                             text_ir_scan_ctdef.relevance_proj_col_))) {
     } else if (OB_ISNULL(text_ir_scan_ctdef.relevance_proj_col_)) {
       ret = OB_ERR_UNEXPECTED;

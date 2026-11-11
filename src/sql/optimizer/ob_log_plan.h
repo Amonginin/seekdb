@@ -1763,7 +1763,6 @@ private: // member functions
   int check_need_calc_match_score(bool &need_calc);
   static bool expr_contains_match_against(const ObRawExpr &root, const int32_t depth);
   static bool select_stmt_uses_match_score(const ObSelectStmt &select_stmt, const int32_t depth);
-  int narrow_text_retrieval_relevance(ObLogicalOperator *op, const bool sort_above);
 public:
   inline const ObLogPlanHint &get_log_plan_hint() const { return log_plan_hint_; }
   inline bool has_join_order_hint() { return !log_plan_hint_.join_order_.leading_tables_.is_empty(); }
