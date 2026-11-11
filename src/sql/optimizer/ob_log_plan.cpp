@@ -12346,7 +12346,7 @@ int ObLogPlan::narrow_text_retrieval_relevance(ObLogicalOperator *op, const bool
       ObLogTableScan *scan = static_cast<ObLogTableScan *>(op);
       ObTextRetrievalInfo &tr_info = scan->get_text_retrieval_info();
       if (OB_NOT_NULL(tr_info.match_expr_) && tr_info.need_calc_relevance_
-          && nullptr == tr_info.topk_limit_expr_ && !sorted) {
+          && nullptr == tr_info.topk_limit_expr_ && nullptr == tr_info.sort_key_.expr_ && !sorted) {
         tr_info.need_calc_relevance_ = false;
       }
     }
