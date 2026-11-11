@@ -135,10 +135,12 @@ int ObIKFTParser::process_one_char(TokenizeContext &ctx,
 {
   int ret = OB_SUCCESS;
   // proces by char with all segmenters
+  // ch / char_len / type 由调用方一次取出，这里直接分发给各处理器：
+  // ObIIKProcessor::process() 会各自再取一遍当前字符，4 个处理器就是 8 次冗余调用。
   for (ObList<ObIIKProcessor *, ObIAllocator>::iterator iter = segmenters_.begin();
        OB_SUCC(ret) && iter != segmenters_.end();
        iter++) {
-    if (OB_FAIL((*iter)->process(ctx))) {
+    if (OB_FAIL((*iter)->do_process(ctx, ch, char_len, type))) {
     }
   }
   return ret;
