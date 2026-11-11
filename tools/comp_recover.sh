@@ -5,6 +5,7 @@
 #   bash /tmp/seekdb/tools/comp_recover.sh check    # 体检：NAS 备份、源码、工具链
 #   bash /tmp/seekdb/tools/comp_recover.sh deps     # 装依赖（rpmfile 解 rpm + rust）
 #   bash /tmp/seekdb/tools/comp_recover.sh build    # 编译 release
+#   bash /tmp/seekdb/tools/comp_recover.sh bench L  # 干净实例 + FTS 完整基线（label=L）
 #   bash /tmp/seekdb/tools/comp_recover.sh test     # 起 mock + 起库 + 跑 B1/B3 测例
 #   bash /tmp/seekdb/tools/comp_recover.sh save     # 实例到期前：把环境搬到 NAS
 #
@@ -433,6 +434,60 @@ stage_start() {
   info "✓ 可用：127.0.0.1:2881，root 空密码，数据目录 /tmp/sdb"
 }
 
+# 跑 B4 的完整基线（build / tokenize / query 三类指标）。
+#
+# 必须走 start_instance：它会先 rm -rf /tmp/sdb。复用旧的 base-dir 是踩过的坑——
+# 上一轮遗留的索引表和后台合并会把机器打满，raw_load_sec 从 0.3s 劣化到 2.7s，
+# build 三项全部失真。所以这里不接受「已经有实例在跑」这种省事做法。
+stage_bench() {
+  local label="${1:-bench}"
+  log "跑 FTS 完整基线（label=${label}）"
+  start_instance
+
+  local cli=""
+  local c
+  for c in "${SRC_DIR}/deps/3rd/u01/obclient/bin/obclient" \
+           "${SRC_DIR}/deps/3rd/u01/obclient/bin/mysql"; do
+    if [ -x "${c}" ]; then
+      cli="${c}"
+      break
+    fi
+  done
+  if [ -z "${cli}" ]; then
+    cli="$(command -v obclient 2>/dev/null || true)"
+  fi
+  [ -n "${cli}" ] || die "找不到 obclient"
+  export LD_LIBRARY_PATH="${SRC_DIR}/deps/3rd/u01/obclient/lib:${LD_LIBRARY_PATH:-}"
+
+  local out="${LOG_DIR}/fts_${label}.txt"
+  ( cd "${SRC_DIR}" && \
+    MYSQL="${cli} -h127.0.0.1 -P2881 -uroot -N -s --protocol=tcp --default-character-set=utf8mb4" \
+    MYSQL_VERBOSE="${cli} -h127.0.0.1 -P2881 -uroot --protocol=tcp --default-character-set=utf8mb4" \
+    LABEL="${label}" OUTPUT="${out}" \
+    bash tools/benchmark/fts_large_bench.sh ) || die "bench 失败，看 ${out}"
+
+  log "关键指标"
+  grep -E "select1_avg_ms:|raw_load_sec:|build_.*_sec:|tokenize_.*_avg_ms:|query_.*(avg_ms|hits):" \
+    "${out}" | tail -16 | sed 's/^/  /'
+
+  # raw_load 是「这一轮可不可信」的哨兵：它在所有 ALTER 之前，不受 build 代码影响。
+  local rl
+  rl=$(grep -m1 "raw_load_sec:" "${out}" | awk '{print $2}')
+  awk -v v="${rl:-0}" 'BEGIN {
+    if (v + 0 > 1.0) printf "  ! raw_load_sec=%ss 偏高，本轮数据很可能被后台合并干扰\n", v;
+    else printf "  ✓ raw_load_sec=%ss 正常，本轮可作 A/B\n", v }'
+
+  log "DDL 切片数分布（出现 >1 才说明并行建索引生效）"
+  grep -rh "dag start process" /tmp/sdb/log/ 2>/dev/null \
+    | grep -o "total_slice_count:[0-9]*" | sort | uniq -c | sed 's/^/  /'
+
+  log "倒排链缓存"
+  info "cached: $(grep -rh "fts inverted chain cached" /tmp/sdb/log/ 2>/dev/null | wc -l)"
+  info "hit:    $(grep -rh "fts inverted chain hit" /tmp/sdb/log/ 2>/dev/null | tail -1 | sed 's/.*] //')"
+
+  info "✓ 报告：${out}"
+}
+
 stage_test() {
   log "阶段 3/3：跑测例"
   kill_mocks
@@ -828,10 +883,11 @@ case "${STAGE}" in
   build) stage_build ;;
   test)  stage_test ;;
   start) stage_start ;;
+  bench) stage_bench "${2:-bench}" ;;
   case)  stage_case "$@" ;;
   save)  stage_save ;;
   save_full) stage_save_full ;;
   restore) stage_restore ;;
   all)   stage_deps; stage_build; stage_test ;;
-  *)     echo "用法: bash $0 {check|deps|build|test|start|save|save_full|restore|all}"; echo "      bash $0 case <套件/用例> [更多...]"; exit 1 ;;
+  *)     echo "用法: bash $0 {check|deps|build|test|start|bench|save|save_full|restore|all}"; echo "      bash $0 bench [label]     # 干净实例 + FTS 完整基线"; echo "      bash $0 case <套件/用例> [更多...]"; exit 1 ;;
 esac
