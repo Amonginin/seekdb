@@ -160,7 +160,8 @@ public:
   int init(
       common::ObIAllocator *allocator,
       const common::ObString &parser_name,
-      const common::ObString &parser_properties);
+      const common::ObString &parser_properties,
+      const bool need_word_count = true);
   /**
    * Split document into multiple words
    *

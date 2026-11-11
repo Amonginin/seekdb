@@ -62,6 +62,8 @@ private:
   static const uint64_t AWF_STOPWORD     = 1 << 1; // filter by sotp word table.
   static const uint64_t AWF_CASEDOWN     = 1 << 2; // convert characters from uppercase to lowercase.
   static const uint64_t AWF_GROUPBY_WORD = 1 << 3; // distinct and word aggregation
+  static const uint64_t AWF_NO_NEED_COUNT = 1 << 4; // the caller only reads the distinct words,
+                                                    // so the per word counter can be skipped.
 public:
   ObAddWordFlag() : flag_(AWF_NONE) {}
   ~ObAddWordFlag() = default;
@@ -75,15 +77,18 @@ public:
   void set_stop_word() { set_flag(AWF_STOPWORD); }
   void set_casedown() { set_flag(AWF_CASEDOWN); }
   void set_groupby_word() { set_flag(AWF_GROUPBY_WORD); }
+  void set_no_need_count() { set_flag(AWF_NO_NEED_COUNT); }
   void clear() { flag_ = AWF_NONE; }
   void clear_min_max_word() { clear_flag(AWF_MIN_MAX_WORD); }
   void clear_stop_word() { clear_flag(AWF_STOPWORD); }
   void clear_casedown() { clear_flag(AWF_CASEDOWN); }
   void clear_groupby_word() { clear_flag(AWF_GROUPBY_WORD); }
+  void clear_no_need_count() { clear_flag(AWF_NO_NEED_COUNT); }
   bool min_max_word() const { return has_flag(AWF_MIN_MAX_WORD); }
   bool stopword() const { return has_flag(AWF_STOPWORD); }
   bool casedown() const { return has_flag(AWF_CASEDOWN); }
   bool groupby_word() const { return has_flag(AWF_GROUPBY_WORD); }
+  bool no_need_count() const { return has_flag(AWF_NO_NEED_COUNT); }
   TO_STRING_KV(K_(flag));
 private:
   uint64_t flag_;

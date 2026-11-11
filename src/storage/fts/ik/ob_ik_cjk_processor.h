@@ -29,11 +29,14 @@ class ObFTDictHub;
 class ObIKCJKProcessor : public ObIIKProcessor
 {
 public:
-  ObIKCJKProcessor(const ObIFTDict &dict_main, ObIAllocator &alloc)
-      : hits_(alloc), dict_main_(dict_main), cjk_start_(-1), cjk_end_(-1)
+  // The main dictionary contains words of at most 16 characters, so no more than 16 prefixes
+  // starting at different positions can be alive at the same time. Keep a margin for safety.
+  static const int64_t MAX_HIT_CNT = 32;
+  ObIKCJKProcessor(const ObIFTDict &dict_main)
+      : hit_cnt_(0), dict_main_(dict_main), cjk_start_(-1), cjk_end_(-1)
   {
   }
-  ~ObIKCJKProcessor() override { hits_.reset(); }
+  ~ObIKCJKProcessor() override = default;
 
 public:
   int do_process(TokenizeContext &ctx,
@@ -42,7 +45,8 @@ public:
                  const ObFTCharUtil::CharType type) override;
 
 private:
-  ObList<ObDATrieHit, ObIAllocator> hits_;
+  ObDATrieHit hits_[MAX_HIT_CNT];
+  int64_t hit_cnt_;
   const ObIFTDict &dict_main_;
   int64_t cjk_start_;
   int64_t cjk_end_;

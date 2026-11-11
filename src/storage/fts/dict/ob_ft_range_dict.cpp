@@ -378,26 +378,46 @@ int ObFTRangeDict::match_with_hit(const ObString &single_word,
   return last_hit.dict_->match_with_hit(single_word, last_hit, hit);
 }
 
+// Both sides are strings of the same charset, and CS_TYPE_UTF8MB4_BIN orders them by code point.
+// UTF-8 keeps code point order in its byte encoding, so comparing the raw bytes yields the very
+// same ordering without going through the charset dispatch on every call.
+static inline int ft_range_word_cmp(const ObString &lhs, const ObString &rhs)
+{
+  const int64_t lhs_len = lhs.length();
+  const int64_t rhs_len = rhs.length();
+  const int64_t cmp_len = MIN(lhs_len, rhs_len);
+  int cmp = 0;
+  if (cmp_len > 0) {
+    cmp = memcmp(lhs.ptr(), rhs.ptr(), static_cast<size_t>(cmp_len));
+  }
+  if (0 == cmp) {
+    cmp = lhs_len < rhs_len ? -1 : (lhs_len > rhs_len ? 1 : 0);
+  }
+  return cmp;
+}
+
 int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const
 {
   int ret = OB_SUCCESS;
-  bool found = false;
-  for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
-    if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                          range_dicts_[i].start_.get_word(),
-                          single_word)
-            <= 0
-        && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                             range_dicts_[i].end_.get_word(),
-                             single_word)
-               >= 0) {
-      dict = range_dicts_[i].dict_;
-      found = true;
+  // Ranges are built from the dictionary in order, so their [start_, end_] bounds are ascending
+  // and non overlapping. Look for the last range whose start_ is not greater than the word.
+  int64_t left = 0;
+  int64_t right = range_dicts_.size() - 1;
+  int64_t found = -1;
+  while (left <= right) {
+    const int64_t mid = left + ((right - left) >> 1);
+    if (ft_range_word_cmp(range_dicts_[mid].start_.get_word(), single_word) <= 0) {
+      found = mid;
+      left = mid + 1;
+    } else {
+      right = mid - 1;
     }
   }
-  if (!found) {
+  if (found < 0 || ft_range_word_cmp(range_dicts_[found].end_.get_word(), single_word) < 0) {
     // not found, dis match
     ret = OB_ENTRY_NOT_EXIST;
+  } else {
+    dict = range_dicts_[found].dict_;
   }
   return ret;
 }

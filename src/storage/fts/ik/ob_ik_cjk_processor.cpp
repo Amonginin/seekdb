@@ -37,59 +37,83 @@ int ObIKCJKProcessor::do_process(TokenizeContext &ctx,
   int ret = OB_SUCCESS;
 
   if (ObFTCharUtil::CharType::USELESS != type) {
-    // handle previous hits_ first and then check from this char
-    for (ObList<ObDATrieHit, ObIAllocator>::iterator iter = hits_.begin();
-         OB_SUCC(ret) && iter != hits_.end();
-         iter++) {
-      ObDATrieHit &hit = *iter;
-      if (OB_FAIL(dict_main_.match_with_hit({char_len, ch}, hit, hit))) {
+    // handle previous hits first and then check from this char.
+    // The hits are kept in a plain array in insertion order; the ones that no longer match are
+    // dropped by compacting the array in place, which keeps the surviving order unchanged.
+    int64_t kept_cnt = 0;
+    for (int64_t i = 0; OB_SUCC(ret) && i < hit_cnt_; ++i) {
+      ObDATrieHit &hit = hits_[i];
+      bool keep = true;
+      if (OB_FAIL(dict_main_.match_with_hit(ObString(char_len, ch), hit, hit))) {
       } else if (hit.is_match()) {
         if (OB_FAIL(ctx.add_token(ctx.fulltext(),
                                   hit.start_pos_,
                                   hit.end_pos_ - hit.start_pos_,
                                   hit.char_cnt_,
                                   ObIKTokenType::IK_CHINESE_TOKEN))) {
-        } else if (hit.is_prefix()) {
-          // match will record the start_cursor
         }
       } else if (hit.is_prefix()) {
         // nothing
       } else if (hit.is_unmatch()) {
-        hits_.erase(hit);
+        keep = false;
       } else {
         ret = OB_UNEXPECT_INTERNAL_ERROR;
       }
+      if (keep) {
+        if (kept_cnt != i) {
+          hits_[kept_cnt] = hit;
+          hits_[kept_cnt].dict_ = hit.dict_;
+        }
+        ++kept_cnt;
+      }
+    }
+    if (OB_SUCC(ret)) {
+      hit_cnt_ = kept_cnt;
     }
     if (OB_SUCC(ret)) {
       // Start from this char
       // find range of dict
-      ObDATrieHit hit(&dict_main_, ctx.get_cursor());
-      if (OB_FAIL(dict_main_.match({char_len, ch}, hit))) {
-      } else if (hit.is_match()) {
-        // output token
-        hits_.push_back(hit);
-        ctx.add_token(ctx.fulltext(),
-                      ctx.get_cursor(),
-                      char_len,
-                      1,
-                      ObIKTokenType::IK_CHINESE_TOKEN);
-      } else if (hit.is_prefix()) {
-        hits_.push_back(hit);
+      if (OB_UNLIKELY(hit_cnt_ >= MAX_HIT_CNT)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("too many concurrent dictionary hits", K(ret), K(hit_cnt_), K(MAX_HIT_CNT));
       } else {
-        // ignore mismatch
+        ObDATrieHit &hit = hits_[hit_cnt_];
+        hit.dict_ = &dict_main_;
+        hit.char_cnt_ = 0;
+        hit.start_pos_ = ctx.get_cursor();
+        hit.end_pos_ = hit.start_pos_;
+        hit.base_idx_ = 0;
+        hit.current_check_ = 0;
+        hit.is_match_ = false;
+        hit.is_prefix_ = false;
+        if (OB_FAIL(dict_main_.match(ObString(char_len, ch), hit))) {
+        } else if (hit.is_match()) {
+          // output token
+          ++hit_cnt_;
+          if (OB_FAIL(ctx.add_token(ctx.fulltext(),
+                                    ctx.get_cursor(),
+                                    char_len,
+                                    1,
+                                    ObIKTokenType::IK_CHINESE_TOKEN))) {
+          }
+        } else if (hit.is_prefix()) {
+          ++hit_cnt_;
+        } else {
+          // ignore mismatch
+        }
       }
     }
   } else {
     // stop previous match
-    hits_.clear();
+    hit_cnt_ = 0;
   }
 
   if (OB_SUCC(ret)) {
     if (ctx.is_last()) {
-      hits_.clear();
+      hit_cnt_ = 0;
     }
   } else {
-    hits_.clear();
+    hit_cnt_ = 0;
   }
 
   return ret;

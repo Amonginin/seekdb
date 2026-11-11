@@ -218,6 +218,11 @@ int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
   } else if (!flag_.groupby_word()) {
     if (OB_FAIL(word_map_.set_refactored(word, 1/*word count*/))) {
     }
+  } else if (flag_.no_need_count()) {
+    // The caller only consumes the distinct words, so the counter is never read back. A single
+    // overwriting insert keeps the key set and the insertion order identical to the counting path.
+    if (OB_FAIL(word_map_.set_refactored(word, 1/*word count*/, 1/*overwrite*/))) {
+    }
   } else if (OB_FAIL(word_map_.get_refactored(word, word_count)) && OB_HASH_NOT_EXIST != ret) {
   } else {
     if (OB_HASH_NOT_EXIST == ret) {

@@ -327,7 +327,8 @@ ObFTParseHelper::~ObFTParseHelper()
 int ObFTParseHelper::init(
     common::ObIAllocator *allocator,
     const common::ObString &parser_name,
-    const common::ObString &parser_properties)
+    const common::ObString &parser_properties,
+    const bool need_word_count)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(is_inited_)) {
@@ -341,6 +342,9 @@ int ObFTParseHelper::init(
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(set_add_word_flag(*parser_desc_))) {
   } else {
+    if (!need_word_count) {
+      add_word_flag_.set_no_need_count();
+    }
     allocator_ = allocator;
     is_inited_ = true;
   }
