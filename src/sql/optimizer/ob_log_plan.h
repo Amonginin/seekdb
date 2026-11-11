@@ -1760,6 +1760,8 @@ private: // member functions
                                   const uint64_t index_table_id,
                                   ObMatchFunRawExpr *ma_expr,
                                   ObTextRetrievalInfo &tr_info);
+  int check_need_calc_match_score(bool &need_calc);
+  static bool expr_contains_match_against(const ObRawExpr &root, const int32_t depth);
 public:
   inline const ObLogPlanHint &get_log_plan_hint() const { return log_plan_hint_; }
   inline bool has_join_order_hint() { return !log_plan_hint_.join_order_.leading_tables_.is_empty(); }

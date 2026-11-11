@@ -12252,27 +12252,74 @@ int ObLogPlan::prepare_text_retrieval_info(const uint64_t ref_table_id,
     }
   }
   if (OB_SUCC(ret)) {
-    /*
-    if (OB_FAIL(ObTransformUtils::check_need_calc_match_score(get_optimizer_context().get_exec_ctx(),
-                                                              get_stmt(),
-                                                              match_against,
-                                                              need_calc_relevance,
-                                                              constraints))) {
+    if (OB_FAIL(check_need_calc_match_score(need_calc_relevance))) {
       LOG_WARN("failed to check need calc relevance", K(ret));
-    } else if (!need_calc_relevance &&
-               OB_FAIL(append_array_no_dup(get_optimizer_context().get_query_ctx()->all_expr_constraints_, constraints))) {
-      LOG_WARN("failed to append array no dup", K(ret));
+    } else {
+      tr_info.match_expr_ = match_against;
+      tr_info.inv_idx_tid_ = inv_idx_tid;
+      tr_info.fwd_idx_tid_ = fwd_idx_tid;
+      tr_info.doc_id_idx_tid_ = doc_id_rowkey_tid;
+      tr_info.rowkey_idx_tid_ = rowkey_doc_tid;
+      tr_info.data_table_id_ = ref_table_id;
+      tr_info.pushdown_match_filter_ = nullptr;
+      tr_info.need_calc_relevance_ = need_calc_relevance;
     }
-    */
-    tr_info.match_expr_ = match_against;
-    tr_info.inv_idx_tid_ = inv_idx_tid;
-    tr_info.fwd_idx_tid_ = fwd_idx_tid;
-    tr_info.doc_id_idx_tid_ = doc_id_rowkey_tid;
-    tr_info.rowkey_idx_tid_ = rowkey_doc_tid;
-    tr_info.data_table_id_ = ref_table_id;
-    tr_info.pushdown_match_filter_ = nullptr;
-    tr_info.need_calc_relevance_ = need_calc_relevance;
   }
+  return ret;
+}
+
+bool ObLogPlan::expr_contains_match_against(const ObRawExpr &root, const int32_t depth)
+{
+  bool found = (T_FUN_MATCH_AGAINST == root.get_expr_type());
+  for (int64_t i = 0; !found && depth < 32 && i < root.get_param_count(); ++i) {
+    const ObRawExpr *child = root.get_param_expr(i);
+    if (OB_NOT_NULL(child)) {
+      found = expr_contains_match_against(*child, depth + 1);
+    }
+  }
+  return found;
+}
+
+// The BM25 score is expensive: it needs the per token document counts and one evaluation per
+// candidate row. A MATCH used as a plain filter only needs its boolean result, so the score is
+// only required when the statement reads it as a value.
+int ObLogPlan::check_need_calc_match_score(bool &need_calc)
+{
+  int ret = OB_SUCCESS;
+  bool used_as_value = true;
+  ObDMLStmt *stmt = get_stmt();
+  if (OB_ISNULL(stmt) || !stmt->is_select_stmt()) {
+    // Keep the previous behavior for anything that is not a plain select.
+  } else {
+    ObSelectStmt *select_stmt = static_cast<ObSelectStmt *>(stmt);
+    used_as_value = false;
+    for (int64_t i = 0; !used_as_value && i < select_stmt->get_select_item_size(); ++i) {
+      const ObRawExpr *item = select_stmt->get_select_item(i).expr_;
+      used_as_value = OB_NOT_NULL(item) && expr_contains_match_against(*item, 0);
+    }
+    ObIArray<ObRawExpr *> &havings = select_stmt->get_having_exprs();
+    for (int64_t i = 0; !used_as_value && i < havings.count(); ++i) {
+      used_as_value = OB_NOT_NULL(havings.at(i)) && expr_contains_match_against(*havings.at(i), 0);
+    }
+    ObIArray<OrderItem> &orders = select_stmt->get_order_items();
+    for (int64_t i = 0; !used_as_value && i < orders.count(); ++i) {
+      used_as_value = OB_NOT_NULL(orders.at(i).expr_)
+                      && expr_contains_match_against(*orders.at(i).expr_, 0);
+    }
+    ObIArray<ObRawExpr *> &groups = select_stmt->get_group_exprs();
+    for (int64_t i = 0; !used_as_value && i < groups.count(); ++i) {
+      used_as_value = OB_NOT_NULL(groups.at(i)) && expr_contains_match_against(*groups.at(i), 0);
+    }
+    // A bare MATCH in the filter list is a boolean condition; any other filter touching the match
+    // expression (MATCH(..) AGAINST(..) > 0.5 for instance) needs the score.
+    ObIArray<ObRawExpr *> &conds = select_stmt->get_condition_exprs();
+    for (int64_t i = 0; !used_as_value && i < conds.count(); ++i) {
+      ObRawExpr *cond = conds.at(i);
+      used_as_value = OB_NOT_NULL(cond) && T_FUN_MATCH_AGAINST != cond->get_expr_type()
+                      && expr_contains_match_against(*cond, 0);
+    }
+  }
+  need_calc = used_as_value;
   return ret;
 }
 
