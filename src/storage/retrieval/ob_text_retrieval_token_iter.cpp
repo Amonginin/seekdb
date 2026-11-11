@@ -96,7 +96,7 @@ void ObTextRetrievalTokenIter::reset()
 
 void ObTextRetrievalTokenIter::reuse()
 {
-  if (inv_idx_agg_cache_mode_ && !inv_idx_agg_param_->need_switch_param_) {
+  if (inv_idx_agg_cache_mode_ && OB_NOT_NULL(inv_idx_agg_param_) && !inv_idx_agg_param_->need_switch_param_) {
     // do nothing
   } else {
     token_doc_cnt_calculated_ = false;
