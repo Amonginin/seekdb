@@ -2097,7 +2097,7 @@ static struct VarsInit{
     }();
 
     [&] (){
-      ObSysVars[141].default_value_ = "4" ;
+      ObSysVars[141].default_value_ = "1" ;
       ObSysVars[141].info_ = "A DDL statement can be parallelized only if you have explicitly enabled parallel DDL in the session or in the SQL statement." ;
       ObSysVars[141].name_ = "_force_parallel_ddl_dop" ;
       ObSysVars[141].data_type_ = ObUInt64Type ;
@@ -2105,7 +2105,7 @@ static struct VarsInit{
       ObSysVars[141].id_ = SYS_VAR__FORCE_PARALLEL_DDL_DOP ;
       cur_max_var_id = MAX(cur_max_var_id, static_cast<int64_t>(SYS_VAR__FORCE_PARALLEL_DDL_DOP)) ;
       ObSysVarsIdToArrayIdx[SYS_VAR__FORCE_PARALLEL_DDL_DOP] = 141 ;
-      ObSysVars[141].base_value_ = "4" ;
+      ObSysVars[141].base_value_ = "1" ;
     ObSysVars[141].alias_ = "OB_SV__FORCE_PARALLEL_DDL_DOP" ;
     }();
 
