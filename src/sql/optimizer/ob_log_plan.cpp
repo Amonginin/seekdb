@@ -12345,8 +12345,10 @@ int ObLogPlan::narrow_text_retrieval_relevance(ObLogicalOperator *op, const bool
     if (log_op_def::LOG_TABLE_SCAN == type) {
       ObLogTableScan *scan = static_cast<ObLogTableScan *>(op);
       ObTextRetrievalInfo &tr_info = scan->get_text_retrieval_info();
+      // sort_key_ is filled from the statement order even when no ordering operator survives, so
+      // only a pushed down topk (which is executed by the scan) keeps the score alive here.
       if (OB_NOT_NULL(tr_info.match_expr_) && tr_info.need_calc_relevance_
-          && nullptr == tr_info.topk_limit_expr_ && nullptr == tr_info.sort_key_.expr_ && !sorted) {
+          && nullptr == tr_info.topk_limit_expr_ && !sorted) {
         tr_info.need_calc_relevance_ = false;
       }
     }
