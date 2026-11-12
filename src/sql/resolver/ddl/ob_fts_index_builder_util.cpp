@@ -15,6 +15,9 @@
  */
 
 #define USING_LOG_PREFIX STORAGE_FTS
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "lib/utility/utility.h"
 #include "ob_fts_index_builder_util.h"
 #include "ob_index_builder_util.h"
@@ -1032,6 +1035,92 @@ int ObFtsIndexBuilderUtil::generate_doc_id_column(
   return ret;
 }
 
+namespace {
+
+// How many CPUs the build may actually occupy.
+//
+// sysconf(_SC_NPROCESSORS_ONLN) reports the CPUs that are online for the
+// process, which inside a container is the host's core count even when the
+// container is held to a fraction of the CPU time by a CFS quota. Splitting the
+// index build into more slices than the quota allows makes the slices compete
+// for the same time slice, and the resulting build time depends on whatever
+// else shares the machine. That is the shape of the instability we measured:
+// the same commit produced 2.7s and 5.7s for the same auxiliary index.
+//
+// So read the quota and treat it as the real ceiling. When it cannot be read,
+// fall back to the online count, which is what the code did before.
+int64_t read_cgroup_cpu_quota()
+{
+  int64_t quota = -1;
+  int64_t period = -1;
+#ifndef _WIN32
+  // cgroup v2 exposes "<quota> <period>" in a single file, or "max <period>"
+  // when the group is unlimited.
+  FILE *v2 = ::fopen("/sys/fs/cgroup/cpu.max", "r");
+  if (nullptr != v2) {
+    char buf[128] = {0};
+    if (nullptr != ::fgets(buf, static_cast<int>(sizeof(buf)), v2)) {
+      char q[64] = {0};
+      long long p = 0;
+      if (2 == ::sscanf(buf, "%63s %lld", q, &p) && 0 != ::strncmp(q, "max", 3)) {
+        quota = ::atoll(q);
+        period = static_cast<int64_t>(p);
+      }
+    }
+    ::fclose(v2);
+    v2 = nullptr;
+  }
+  // cgroup v1 keeps the two numbers in separate files.
+  if (quota <= 0 || period <= 0) {
+    FILE *fq = ::fopen("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "r");
+    FILE *fp = ::fopen("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "r");
+    if (nullptr != fq && nullptr != fp) {
+      char qbuf[64] = {0};
+      char pbuf[64] = {0};
+      if (nullptr != ::fgets(qbuf, static_cast<int>(sizeof(qbuf)), fq)
+          && nullptr != ::fgets(pbuf, static_cast<int>(sizeof(pbuf)), fp)) {
+        const int64_t q = ::atoll(qbuf);
+        const int64_t p = ::atoll(pbuf);
+        if (q > 0 && p > 0) {
+          quota = q;
+          period = p;
+        }
+      }
+    }
+    if (nullptr != fq) {
+      ::fclose(fq);
+      fq = nullptr;
+    }
+    if (nullptr != fp) {
+      ::fclose(fp);
+      fp = nullptr;
+    }
+  }
+#endif
+  if (quota <= 0 || period <= 0) {
+    return 0;
+  }
+  // Round up: a quota of 150% of one core should still get two slices.
+  const int64_t cpus = (quota + period - 1) / period;
+  return cpus > 0 ? cpus : 0;
+}
+
+// The hard cap of 8 is kept: going wider than that was measured to be slower
+// even on a real 8-core machine, because the build is memory bound near the end.
+int64_t fts_build_parallelism_ceiling()
+{
+  const int64_t online = get_cpu_num();
+  const int64_t quota_cpus = read_cgroup_cpu_quota();
+  const int64_t usable = (quota_cpus > 0) ? MIN(online, quota_cpus) : online;
+  const int64_t ceiling = MAX(1L, MIN(usable, 8L));
+  // Log once per decision so a bench run can tell whether the build was capped
+  // by the container quota or by the hard cap.
+  LOG_INFO("fts build parallelism ceiling", K(online), K(quota_cpus), K(ceiling));
+  return ceiling;
+}
+
+} // namespace
+
 int ObFtsIndexBuilderUtil::decide_parallelism(
     const share::schema::ObIndexType index_type,
     const int64_t original_parallelism,
@@ -1062,7 +1151,7 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
         // had plenty of idle cores. The inverted index is the dominant cost of the
         // build (millions of rows), so give it a real DOP when the caller did not
         // ask for one, and still honor a larger explicit request.
-        decided_parallelism = MAX(original_parallelism, MIN(get_cpu_num(), 8L));
+        decided_parallelism = MAX(original_parallelism, fts_build_parallelism_ceiling());
         break;
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL:
