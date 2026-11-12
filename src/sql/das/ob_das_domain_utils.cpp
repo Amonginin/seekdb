@@ -16,6 +16,7 @@
 
 #include "config_bridge.h"
 #include "lib/container/ob_se_array.h"
+#include "lib/time/ob_time_utility.h"
 #include "common/json_type/ob_json_bin.h"
 #include "share/ob_errno.h"
 #define USING_LOG_PREFIX SQL_DAS
@@ -285,16 +286,25 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
   int ret = OB_SUCCESS;
   static int64_t FT_WORD_DOC_COL_CNT = 4;
   static constexpr int64_t FT_MAX_WORD_BUCKET = 997;
-  const int64_t ft_word_bkt_cnt = MIN(MAX(fulltext.length() / 10, 2), FT_MAX_WORD_BUCKET);
+  // Reuse one hash map per thread instead of building a fresh one per document.
+  // The build calls this once per document per auxiliary table, so a per-call
+  // create/destroy is 20000 allocations that buy nothing: segment() clears the
+  // map before filling it anyway. The bucket count is fixed rather than derived
+  // from the document length, because the length heuristic gave short documents
+  // two buckets and left them rehashing.
+  static thread_local ObFTWordMap tl_word_map;
+  const int64_t begin_us = common::ObTimeUtility::current_time();
   int64_t doc_length = 0;
-  ObFTWordMap ft_word_map;
+  ObFTWordMap &ft_word_map = tl_word_map;
   void *rows_buf = nullptr;
   blocksstable::ObDatumRow *rows = nullptr;
   if (OB_ISNULL(helper) || OB_UNLIKELY(!ft_obj_meta.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (0 == fulltext.length()) {
     ret = OB_ITER_END;
-  } else if (OB_FAIL(ft_word_map.create(ft_word_bkt_cnt, common::ObMemAttr("FTWordMap")))) {
+  } else if (!ft_word_map.created()
+             && OB_FAIL(ft_word_map.create(FT_MAX_WORD_BUCKET, common::ObMemAttr("FTWordMap")))) {
+    LOG_WARN("failed to create the reused fulltext word map", K(ret));
   } else if (OB_FAIL(segment_and_calc_word_count(allocator,
                                                  helper,
                                                  ft_obj_meta,
@@ -332,6 +342,24 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
           ++i;
         }
       }
+    }
+  }
+  // Report the cost of producing the posting rows (hash + segment + row build)
+  // every 4096 documents. The gap between this and the per-document build time
+  // from the benchmark is what the storage write costs, which is the number the
+  // next optimisation has to be aimed at.
+  {
+    static thread_local int64_t tl_rows_us = 0;
+    static thread_local int64_t tl_rows_docs = 0;
+    static thread_local int64_t tl_rows_postings = 0;
+    tl_rows_us += common::ObTimeUtility::current_time() - begin_us;
+    ++tl_rows_docs;
+    tl_rows_postings += word_rows.count();
+    if (0 == tl_rows_docs % 4096) {
+      LOG_INFO("fts generate posting rows timing", "docs", tl_rows_docs,
+               "postings", tl_rows_postings,
+               "avg_us_per_doc", tl_rows_us / tl_rows_docs,
+               "avg_ns_per_posting", tl_rows_postings > 0 ? tl_rows_us * 1000 / tl_rows_postings : 0);
     }
   }
   return ret;
