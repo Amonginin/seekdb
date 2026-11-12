@@ -30,8 +30,9 @@ namespace storage
 class ObFTWord final
 {
 public:
-  ObFTWord() : word_(), meta_() {}
-  ObFTWord(const int64_t length, const char *ptr, const ObObjMeta &meta) : meta_(meta)
+  ObFTWord() : word_(), meta_(), hash_val_(0), hash_valid_(false) {}
+  ObFTWord(const int64_t length, const char *ptr, const ObObjMeta &meta)
+      : meta_(meta), hash_val_(0), hash_valid_(false)
   {
     word_.set_string(ptr, length);
   }
@@ -49,6 +50,13 @@ public:
 private:
   ObDatum word_;
   ObObjMeta meta_;
+  // The collation aware hash walks the whole word, and the counting insert in
+  // ObAddWord::groupby_word presents the very same key twice (once to look it
+  // up, once to write it back). Remembering the value makes the second lookup
+  // free. Copies share the text pointer and the meta, so a copied cache stays
+  // valid.
+  mutable uint64_t hash_val_;
+  mutable bool hash_valid_;
 };
 
 typedef common::hash::ObHashMap<ObFTWord, int64_t> ObFTWordMap;

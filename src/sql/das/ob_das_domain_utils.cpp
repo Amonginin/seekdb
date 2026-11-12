@@ -37,6 +37,12 @@ namespace sql
 {
 using storage::ObFTWordMap;
 
+// Splits the cost of producing posting rows into its two halves: the tokenizer
+// call and everything else (word map plus row assembly). Reported next to the
+// total so a benchmark run says which half to attack rather than leaving it a
+// guess between the parser and the hash table.
+static thread_local int64_t tl_fts_segment_us = 0;
+
 
 ObObjDatumMapType ObFTIndexRowCache::FTS_INDEX_TYPES[] = {OBJ_DATUM_STRING, OBJ_DATUM_STRING, OBJ_DATUM_8BYTE_DATA, OBJ_DATUM_8BYTE_DATA};
 ObObjDatumMapType ObFTIndexRowCache::FTS_DOC_WORD_TYPES[] = {OBJ_DATUM_STRING, OBJ_DATUM_STRING, OBJ_DATUM_8BYTE_DATA, OBJ_DATUM_8BYTE_DATA};
@@ -286,13 +292,14 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
   int ret = OB_SUCCESS;
   static int64_t FT_WORD_DOC_COL_CNT = 4;
   static constexpr int64_t FT_MAX_WORD_BUCKET = 997;
-  // Reuse one hash map per thread instead of building a fresh one per document.
-  // The build calls this once per document per auxiliary table, so a per-call
-  // create/destroy is 20000 allocations that buy nothing: segment() clears the
-  // map before filling it anyway. The bucket count is fixed rather than derived
-  // from the document length, because the length heuristic gave short documents
-  // two buckets and left them rehashing.
+  // Reuse one hash map per thread instead of building a fresh one per document:
+  // the build calls this once per document per auxiliary table, so a per-call
+  // create/destroy buys nothing. The table only grows when a document needs more
+  // buckets than it currently has — sizing it once at the maximum made every
+  // clear() walk a thousand empty buckets for a document that has thirty words.
   static thread_local ObFTWordMap tl_word_map;
+  const int64_t wanted_bucket =
+      MIN(MAX(static_cast<int64_t>(fulltext.length()) / 10, 16L), FT_MAX_WORD_BUCKET);
   const int64_t begin_us = common::ObTimeUtility::current_time();
   int64_t doc_length = 0;
   ObFTWordMap &ft_word_map = tl_word_map;
@@ -302,9 +309,16 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
     ret = OB_INVALID_ARGUMENT;
   } else if (0 == fulltext.length()) {
     ret = OB_ITER_END;
-  } else if (!ft_word_map.created()
-             && OB_FAIL(ft_word_map.create(FT_MAX_WORD_BUCKET, common::ObMemAttr("FTWordMap")))) {
-    LOG_WARN("failed to create the reused fulltext word map", K(ret));
+  } else if (OB_UNLIKELY(!ft_word_map.created()
+                         || ft_word_map.bucket_count() < wanted_bucket)) {
+    if (ft_word_map.created() && OB_FAIL(ft_word_map.destroy())) {
+      LOG_WARN("failed to destroy the reused fulltext word map", K(ret));
+    } else if (OB_FAIL(ft_word_map.create(wanted_bucket, common::ObMemAttr("FTWordMap")))) {
+      LOG_WARN("failed to create the reused fulltext word map", K(ret), K(wanted_bucket));
+    }
+  }
+  if (OB_FAIL(ret)) {
+    // fall through to the timing block so a failed document is still counted
   } else if (OB_FAIL(segment_and_calc_word_count(allocator,
                                                  helper,
                                                  ft_obj_meta,
@@ -359,6 +373,7 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
       LOG_INFO("fts generate posting rows timing", "docs", tl_rows_docs,
                "postings", tl_rows_postings,
                "avg_us_per_doc", tl_rows_us / tl_rows_docs,
+               "seg_us_per_doc", tl_fts_segment_us / tl_rows_docs,
                "avg_ns_per_posting", tl_rows_postings > 0 ? tl_rows_us * 1000 / tl_rows_postings : 0);
     }
   }
@@ -374,6 +389,7 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
     ObFTWordMap &words_count)
 {
   int ret = OB_SUCCESS;
+  const int64_t seg_begin_us = common::ObTimeUtility::current_time();
   ObCollationType type = meta.get_collation_type();
   if (OB_ISNULL(helper)
       || OB_UNLIKELY(ObCollationType::CS_TYPE_INVALID == type
@@ -382,6 +398,7 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(helper->segment(meta, fulltext.ptr(), fulltext.length(), doc_length, words_count))) {
   }
+  tl_fts_segment_us += common::ObTimeUtility::current_time() - seg_begin_us;
 
   STORAGE_FTS_LOG(TRACE, "segment and calc word count", K(ret), K(words_count.size()), K(type));
   return ret;
