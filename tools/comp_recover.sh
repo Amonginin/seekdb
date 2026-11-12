@@ -530,6 +530,37 @@ stage_bench() {
   info "✓ 报告：${out}"
 }
 
+# 采样 build 阶段的热点：干净实例 → 灌 20000 篇 → perf/gdb 采样三次 ALTER → 打热点报告。
+# 不跑分词/查询压测，一轮几分钟，用来回答「build 的 4.2s/索引 花在哪个函数」。
+stage_prof() {
+  local label="${1:-prof}"
+  log "采样 build 热点（label=${label}）"
+  start_instance
+
+  local cli="" c
+  for c in "${SRC_DIR}/deps/3rd/u01/obclient/bin/obclient" \
+           "${SRC_DIR}/deps/3rd/u01/obclient/bin/mysql"; do
+    if [ -x "${c}" ]; then cli="${c}"; break; fi
+  done
+  if [ -z "${cli}" ]; then
+    cli="$(command -v obclient 2>/dev/null || true)"
+  fi
+  [ -n "${cli}" ] || die "找不到 obclient"
+  export LD_LIBRARY_PATH="${SRC_DIR}/deps/3rd/u01/obclient/lib:${LD_LIBRARY_PATH:-}"
+
+  local out="${LOG_DIR}/fts_${label}.txt"
+  ( cd "${SRC_DIR}" && \
+    MYSQL="${cli} -h127.0.0.1 -P2881 -uroot -N -s --protocol=tcp --default-character-set=utf8mb4" \
+    MYSQL_VERBOSE="${cli} -h127.0.0.1 -P2881 -uroot --protocol=tcp --default-character-set=utf8mb4" \
+    LABEL="${label}" OUTPUT="${out}" PROFILE_BUILD=1 \
+    bash tools/benchmark/fts_large_bench.sh ) || die "采样失败，看 ${out}"
+
+  log "构建耗时（采样轮，perf 在窗口外启停，数字仍可参考）"
+  grep -E "^build_.*_sec:" "${out}" | sed 's/^/  /'
+  # 热点报告就在终端里，落盘一份方便贴出来。
+  info "✓ 完整日志：${out}"
+}
+
 stage_test() {
   log "阶段 3/3：跑测例"
   kill_mocks
@@ -928,10 +959,11 @@ case "${STAGE}" in
   test)  stage_test ;;
   start) stage_start ;;
   bench) stage_bench "${2:-bench}" ;;
+  prof)  stage_prof "${2:-prof}" ;;
   case)  stage_case "$@" ;;
   save)  stage_save ;;
   save_full) stage_save_full ;;
   restore) stage_restore ;;
   all)   stage_deps; stage_build; stage_test ;;
-  *)     echo "用法: bash $0 {check|deps|build|test|start|bench|save|save_full|restore|all}"; echo "      bash $0 bench [label]     # 干净实例 + FTS 完整基线"; echo "      bash $0 case <套件/用例> [更多...]"; exit 1 ;;
+  *)     echo "用法: bash $0 {check|deps|build|test|start|bench|prof|save|save_full|restore|all}"; echo "      bash $0 bench [label]     # 干净实例 + FTS 完整基线"; echo "      bash $0 prof  [label]     # 只采样 build 热点（perf/gdb），不跑分词/查询"; echo "      bash $0 case <套件/用例> [更多...]"; exit 1 ;;
 esac

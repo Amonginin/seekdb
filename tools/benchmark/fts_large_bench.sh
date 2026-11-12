@@ -49,6 +49,7 @@ QUERY_ROUNDS="${QUERY_ROUNDS:-200}"
 SAMPLES="${SAMPLES:-3}"
 WARMUP="${WARMUP:-30}"
 SKIP_LOAD="${SKIP_LOAD:-0}"
+PROFILE_BUILD="${PROFILE_BUILD:-0}"
 OUTPUT="${OUTPUT:-}"
 
 IK_TEXT="OceanBase是一款非常稳定的数据库，全文索引的分词器热路径优化包括解析器实例复用、停用词全局单例、内存池化数据结构等技术，在大量文档索引和查询场景下可以显著降低 CPU 开销。"
@@ -206,6 +207,103 @@ time_mysql_command() {
   log "  ${name}: ${total_sec}s"
 }
 
+# ---------------------------------------------------------------- build profiling
+# PROFILE_BUILD=1：在三次 ALTER 期间给 observer 采样，回答「build 的 4.2s/索引 到底花在哪个函数」。
+#
+# 为什么需要它：build 占评分 coeff 的 52%，但我们只知道「写行 300K 行/秒」这一个间接数字，
+# 分不清是分词、组行、还是插入路径的行开销。靠猜已经错过两次（分词不是瓶颈、relevance 是承重墙），
+# 所以先采样再动手。
+#
+# 有 perf 用 perf；没有 perf 退化成 gdb 采样（poor man's profiler）。
+PROFILE_MODE=""
+PROFILE_DATA=""
+PROFILE_JOB=""
+PROFILE_PID=""
+
+profile_start() {
+  PROFILE_PID="$(pgrep -f 'seekdb --base-dir' | head -1)"
+  if [[ -z "${PROFILE_PID}" ]]; then
+    PROFILE_MODE="none"
+    log "  [profile] 找不到 observer 进程（seekdb --base-dir ...），跳过采样"
+    return 0
+  fi
+  : > "${TMP_DIR}/profile.stop"
+  rm -f "${TMP_DIR}/profile.stop"
+  if command -v perf >/dev/null 2>&1; then
+    PROFILE_MODE="perf"
+    PROFILE_DATA="${TMP_DIR}/perf_build.data"
+    rm -f "${PROFILE_DATA}"
+    # 不带子命令时 perf 会一直采样到收到 SIGINT，正好卡住三次 ALTER 的窗口。
+    perf record -F 499 -g -p "${PROFILE_PID}" -o "${PROFILE_DATA}" >/dev/null 2>&1 &
+    PROFILE_JOB=$!
+    sleep 1
+    if ! kill -0 "${PROFILE_JOB}" 2>/dev/null; then
+      PROFILE_MODE="none"
+      log "  [profile] perf 启动失败（多为 perf_event_paranoid 限制），尝试：sysctl -w kernel.perf_event_paranoid=-1"
+      return 0
+    fi
+    log "  [profile] perf 采样中 pid=${PROFILE_PID} 频率=499Hz"
+  elif command -v gdb >/dev/null 2>&1; then
+    PROFILE_MODE="gdb"
+    PROFILE_DATA="${TMP_DIR}/gdb_samples.txt"
+    : > "${PROFILE_DATA}"
+    (
+      while [[ ! -f "${TMP_DIR}/profile.stop" ]]; do
+        gdb -p "${PROFILE_PID}" -batch -ex "thread apply all bt 10" 2>/dev/null >> "${PROFILE_DATA}"
+        echo "----SAMPLE----" >> "${PROFILE_DATA}"
+        sleep 0.2
+      done
+    ) &
+    PROFILE_JOB=$!
+    log "  [profile] 没有 perf，改用 gdb 采样 pid=${PROFILE_PID}（每 0.2s 一次全线程栈）"
+  else
+    PROFILE_MODE="none"
+    log "  [profile] perf 和 gdb 都没有，无法采样。装一个：apt-get install -y linux-tools-generic 或 gdb"
+  fi
+}
+
+profile_stop() {
+  case "${PROFILE_MODE}" in
+    perf)
+      kill -INT "${PROFILE_JOB}" 2>/dev/null
+      wait "${PROFILE_JOB}" 2>/dev/null
+      log "  [profile] 采样结束 -> ${PROFILE_DATA}"
+      ;;
+    gdb)
+      : > "${TMP_DIR}/profile.stop"
+      wait "${PROFILE_JOB}" 2>/dev/null
+      log "  [profile] 采样结束 -> ${PROFILE_DATA}"
+      ;;
+  esac
+}
+
+profile_report() {
+  case "${PROFILE_MODE}" in
+    perf)
+      if [[ ! -s "${PROFILE_DATA}" ]]; then
+        log "  [profile] 没有采到样本"
+        return 0
+      fi
+      log "  ---- perf 平面报告（叶子函数，按自身 CPU 占比）----"
+      perf report --stdio -i "${PROFILE_DATA}" --sort symbol --percent-limit 1 2>/dev/null | sed -n '1,45p'
+      log "  ---- perf 按 dso+symbol（看是 observer 自身还是 libc/第三方）----"
+      perf report --stdio -i "${PROFILE_DATA}" --sort dso,symbol --percent-limit 1 2>/dev/null | sed -n '1,30p'
+      ;;
+    gdb)
+      if [[ ! -s "${PROFILE_DATA}" ]]; then
+        log "  [profile] 没有采到样本"
+        return 0
+      fi
+      log "  ---- gdb 采样热点（帧出现次数，粗粒度）----"
+      grep -oE ' in [A-Za-z_][A-Za-z0-9_:<>~]*' "${PROFILE_DATA}" \
+        | sed 's/^ in //' | sort | uniq -c | sort -rn | head -30
+      ;;
+    *)
+      log "  [profile] 本轮没有采样数据"
+      ;;
+  esac
+}
+
 write_report() {
   local ts git_head git_dirty
   ts="$(date '+%Y-%m-%d %H:%M:%S')"
@@ -342,6 +440,11 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
       done
     fi
 
+    # 采样器必须在计时窗口之外启停：perf 启动要 sleep 1，收尾要 flush，
+    # 这两段若落在窗口里会把 build_total 抬高，profiling 那轮的数字就不能用了。
+    if [[ "${PROFILE_BUILD}" == "1" && "${r}" -eq 1 ]]; then
+      profile_start
+    fi
     build_start_ns=$(now_ns)
     time_mysql_command "build_ik_all" \
       "USE fts_large_bench; ALTER TABLE docs ADD FULLTEXT INDEX fti_all_ik(title, content) WITH PARSER ik;"
@@ -350,6 +453,9 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
     time_mysql_command "build_beng_en" \
       "USE fts_large_bench; ALTER TABLE docs ADD FULLTEXT INDEX fti_en_beng(title_en, content_en) WITH PARSER beng;"
     build_end_ns=$(now_ns)
+    if [[ "${PROFILE_BUILD}" == "1" && "${r}" -eq 1 ]]; then
+      profile_stop
+    fi
 
     total="$(elapsed_sec "${build_start_ns}" "${build_end_ns}")"
     if [[ -z "${build_total_sec}" ]] || awk "BEGIN {exit !(${total} < ${build_total_sec})}"; then
@@ -393,6 +499,14 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
     exit 1
   fi
   log "  三个全文索引均已就绪"
+
+  # 采样模式下，build 一结束就把报告打出来并退出：此时机器状态最干净，
+  # 也让「编译 → 采样」一轮只占几分钟机时。
+  if [[ "${PROFILE_BUILD}" == "1" ]]; then
+    profile_report
+    log "PROFILE_BUILD=1：只做 build 采样，跳过分词与查询压测"
+    exit 0
+  fi
 else
   log "[1-3/5] SKIP_LOAD=1, reuse existing fts_large_bench.docs and indexes"
   loaded=$(mysql_exec "USE fts_large_bench; SELECT COUNT(*) FROM docs;" 2>/dev/null | tail -1 || echo "0")
