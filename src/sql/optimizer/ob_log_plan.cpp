@@ -12306,28 +12306,8 @@ bool ObLogPlan::select_stmt_uses_match_score(const ObSelectStmt &select_stmt, co
   const ObIArray<ObRawExpr *> &conds = select_stmt.get_condition_exprs();
   for (int64_t i = 0; !used && i < conds.count(); ++i) {
     const ObRawExpr *cond = conds.at(i);
-    if (OB_ISNULL(cond)) {
-      // nothing to inspect
-    } else if (T_FUN_MATCH_AGAINST == cond->get_expr_type()) {
-      // A bare MATCH used as the filter only needs its boolean result.
-    } else if (T_OP_BOOL == cond->get_expr_type()
-               && 1 == cond->get_param_count()
-               && OB_NOT_NULL(cond->get_param_expr(0))
-               && T_FUN_MATCH_AGAINST == cond->get_param_expr(0)->get_expr_type()
-               && OB_ISNULL(select_stmt.get_limit_expr())) {
-      // The resolver wraps a MATCH that is used as a predicate in BOOL(...) so the
-      // expression has a boolean type. That wrapper still only asks whether the
-      // document matched; it never reads the score. Treating it as a value use
-      // made every "WHERE MATCH(...) AGAINST(...)" query compute a BM25 score for
-      // every candidate row, which nobody reads.
-      //
-      // The limit check is deliberate: a query with LIMIT gets an implicit top-k
-      // ordering on the match, and that ordering does read the score. Only the
-      // unlimited form is known to be harmless to skip, so leave the limited form
-      // on the existing behaviour.
-    } else {
-      used = expr_contains_match_against(*cond, 0);
-    }
+    used = OB_NOT_NULL(cond) && T_FUN_MATCH_AGAINST != cond->get_expr_type()
+           && expr_contains_match_against(*cond, 0);
   }
   // The match expression may live in a nested query, so the whole statement tree has to be
   // inspected: the implicit relevance ordering is added to the query that owns the match.
