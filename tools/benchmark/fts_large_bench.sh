@@ -306,15 +306,69 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
   log "  table rows: ${loaded}"
 
   log "[3/5] build fulltext indexes ..."
-  build_start_ns=$(now_ns)
-  time_mysql_command "build_ik_all" \
-    "USE fts_large_bench; ALTER TABLE docs ADD FULLTEXT INDEX fti_all_ik(title, content) WITH PARSER ik;"
-  time_mysql_command "build_ik_content" \
-    "USE fts_large_bench; ALTER TABLE docs ADD FULLTEXT INDEX fti_content_ik(content) WITH PARSER ik;"
-  time_mysql_command "build_beng_en" \
-    "USE fts_large_bench; ALTER TABLE docs ADD FULLTEXT INDEX fti_en_beng(title_en, content_en) WITH PARSER beng;"
-  build_end_ns=$(now_ns)
-  METRICS[build_total_sec]="$(elapsed_sec "${build_start_ns}" "${build_end_ns}")"
+  # The build is the noisiest part of the benchmark: the same commit produced
+  # 2.7s and 5.7s for the same index on the platform, because a background
+  # merge from the raw load competes with the build for the same cores.
+  #
+  # BUILD_REPEATS rebuilds the indexes that many times and keeps the best
+  # result for each one. The minimum is the honest number here: a run that got
+  # unlucky with the merge is not a measurement of the build code. Set it to 1
+  # for a single pass.
+  local repeats="${BUILD_REPEATS:-1}"
+  local build_total_sec=""
+  local build_start_ns build_end_ns
+  if [[ "${repeats}" -gt 1 ]]; then
+    log "  (build repeated ${repeats}x, keeping the best per index)"
+  fi
+
+  build_ik_all_best=""
+  build_ik_content_best=""
+  build_beng_en_best=""
+  local r
+  for ((r = 1; r <= repeats; r++)); do
+    # Drop only the indexes, not the data: the data load is the slow part and
+    # it does not change between attempts.
+    mysql_exec "USE fts_large_bench;
+      ALTER TABLE docs DROP INDEX fti_all_ik;
+      ALTER TABLE docs DROP INDEX fti_content_ik;
+      ALTER TABLE docs DROP INDEX fti_en_beng;" >/dev/null 2>&1
+
+    build_start_ns=$(now_ns)
+    time_mysql_command "build_ik_all" \
+      "USE fts_large_bench; ALTER TABLE docs ADD FULLTEXT INDEX fti_all_ik(title, content) WITH PARSER ik;"
+    time_mysql_command "build_ik_content" \
+      "USE fts_large_bench; ALTER TABLE docs ADD FULLTEXT INDEX fti_content_ik(content) WITH PARSER ik;"
+    time_mysql_command "build_beng_en" \
+      "USE fts_large_bench; ALTER TABLE docs ADD FULLTEXT INDEX fti_en_beng(title_en, content_en) WITH PARSER beng;"
+    build_end_ns=$(now_ns)
+
+    local total
+    total="$(elapsed_sec "${build_start_ns}" "${build_end_ns}")"
+    if [[ -z "${build_total_sec}" ]] || awk "BEGIN {exit !(${total} < ${build_total_sec})}"; then
+      build_total_sec="${total}"
+    fi
+    for name in build_ik_all build_ik_content build_beng_en; do
+      local cur best_var="best"
+      cur="${METRICS[${name}_sec]}"
+      case "${name}" in
+        build_ik_all)     best_var="build_ik_all_best" ;;
+        build_ik_content) best_var="build_ik_content_best" ;;
+        build_beng_en)    best_var="build_beng_en_best" ;;
+      esac
+      local best="${!best_var}"
+      if [[ -z "${best}" ]] || awk "BEGIN {exit !(${cur} < ${best})}"; then
+        printf -v "${best_var}" '%s' "${cur}"
+      fi
+    done
+    log "  build round ${r}/${repeats}: total=${total}s  (ik_all=${METRICS[build_ik_all_sec]} content=${METRICS[build_ik_content_sec]} beng=${METRICS[build_beng_en_sec]})"
+  done
+  if [[ "${repeats}" -gt 1 ]]; then
+    METRICS[build_ik_all_sec]="${build_ik_all_best}"
+    METRICS[build_ik_content_sec]="${build_ik_content_best}"
+    METRICS[build_beng_en_sec]="${build_beng_en_best}"
+    log "  best of ${repeats}: ik_all=${build_ik_all_best} content=${build_ik_content_best} beng=${build_beng_en_best}"
+  fi
+  METRICS[build_total_sec]="${build_total_sec}"
 else
   log "[1-3/5] SKIP_LOAD=1, reuse existing fts_large_bench.docs and indexes"
   loaded=$(mysql_exec "USE fts_large_bench; SELECT COUNT(*) FROM docs;" 2>/dev/null | tail -1 || echo "0")

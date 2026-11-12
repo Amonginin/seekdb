@@ -482,7 +482,7 @@ stage_bench() {
   ( cd "${SRC_DIR}" && \
     MYSQL="${cli} -h127.0.0.1 -P2881 -uroot -N -s --protocol=tcp --default-character-set=utf8mb4" \
     MYSQL_VERBOSE="${cli} -h127.0.0.1 -P2881 -uroot --protocol=tcp --default-character-set=utf8mb4" \
-    LABEL="${label}" OUTPUT="${out}" \
+    LABEL="${label}" OUTPUT="${out}" BUILD_REPEATS="${BUILD_REPEATS:-1}" \
     bash tools/benchmark/fts_large_bench.sh ) || die "bench 失败，看 ${out}"
 
   log "关键指标"

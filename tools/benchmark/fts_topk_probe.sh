@@ -21,7 +21,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${ROOT_DIR}" || exit 1
 
 MYSQL="${MYSQL:-mysql}"
-MYSQL_VERBOSE="${MYSQL_VERBOSE:-mysql}"
+MYSQL_VERBOSE="${MYSQL_VERBOSE:-${MYSQL}}"
 DB="${DB:-fts_large_bench}"
 TABLE="${TABLE:-docs}"
 MATCH_WORDS="${MATCH_WORDS:-倒排索引 tokenizer}"
@@ -104,9 +104,8 @@ ${MYSQL_VERBOSE} -e "EXPLAIN SELECT COUNT(*) FROM ${DB}.${TABLE} WHERE MATCH(con
 # --------------------------------------------------------------- 5. 扫描行数
 log "5. 实际扫描行数（从 observer.log 数 rowscanned）"
 LOG_DIR="${LOG_DIR:-/tmp/sdb/log}"
-if [ -d "${LOG_DIR}" ]; then
-  grep -rhoE "rowscanned=[0-9]+|rows=[0-9]+" "${LOG_DIR}" 2>/dev/null | tail -20 | sed 's/^/  /'
-  echo "  (若为空，改用 perf schema 或 v$sql_monitor 采样)"
+if [ -d "${LOG_DIR}" ]; then  grep -rhoE "rowscanned=[0-9]+|rows=[0-9]+" "${LOG_DIR}" 2>/dev/null | tail -20 | sed 's/^/  /'
+  echo "  (若为空，改用 perf schema 或 v\$sql_monitor 采样)"
 else
   echo "  日志目录不存在: ${LOG_DIR}"
 fi
@@ -154,6 +153,60 @@ else
 fi
 
 log "完成"
+
+# --------------------------------------------------------------- 9. 成本来自 token 数还是行数
+# 这是本探针要回答的最终问题。
+#
+# 已经测到的事实：
+#   LIMIT 20   -> 8.10 ms
+#   LIMIT 100  -> 8.44 ms
+#   LIMIT 1000 -> 12.94 ms
+#   LIMIT 8001 -> 32.52 ms
+#   裸 MATCH    -> 7.12 ms
+#
+# LIMIT 20 和 LIMIT 100 几乎一样，而它们都比裸 MATCH 慢。这说明：
+#   a) LIMIT 确实生效（20 比 8001 快 4 倍）
+#   b) LIMIT 省不掉 MATCH 本身的扫描成本
+#
+# MATCH 的查询词被切成多个 token，每个 token 都要扫完自己的 posting list，
+# 归并才能产出第一个交集行。所以如果 token 数才是成本来源，那么：
+#   单 token 的 MATCH + LIMIT 20 应当明显快于双 token 的 MATCH + LIMIT 20。
+# 这一段直接测这个对比。
+log "9. 成本来自 query token 数还是结果行数"
+
+timed_hits() {
+  # $1=sql $2=label
+  local sql="$1" label="$2" hits ms
+  hits=$(mysql_exec "${sql}" | tail -1)
+  ms=$(run_timed "${sql}" "${QUERY_ROUNDS}")
+  printf '  %-34s hits=%-8s avg=%.4f ms\n' "${label}" "${hits:-?}" "${ms}"
+}
+
+echo "  9a. 同样的 LIMIT 20，query token 数不同"
+timed_hits "SELECT COUNT(*) FROM (SELECT id FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('倒排索引') LIMIT 20) t;" \
+           "单 token（倒排索引）"
+timed_hits "SELECT COUNT(*) FROM (SELECT id FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('倒排索引 tokenizer') LIMIT 20) t;" \
+           "双 token（倒排索引 tokenizer）"
+timed_hits "SELECT COUNT(*) FROM (SELECT id FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('倒排索引 tokenizer 索引') LIMIT 20) t;" \
+           "三 token"
+
+echo "  9b. 同样的 query token，不同 LIMIT"
+timed_hits "SELECT COUNT(*) FROM (SELECT id FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('倒排索引') LIMIT 20) t;" \
+           "单 token LIMIT 20"
+timed_hits "SELECT COUNT(*) FROM (SELECT id FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('倒排索引') LIMIT 100) t;" \
+           "单 token LIMIT 100"
+timed_hits "SELECT COUNT(*) FROM (SELECT id FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('倒排索引') LIMIT 8001) t;" \
+           "单 token LIMIT 8001"
+timed_hits "SELECT COUNT(*) FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('倒排索引');" \
+           "单 token 无 LIMIT"
+
+echo "  9c. 单列 vs 双列 MATCH"
+timed_hits "SELECT COUNT(*) FROM (SELECT id FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('倒排索引 tokenizer') LIMIT 20) t;" \
+           "MATCH(content)"
+timed_hits "SELECT COUNT(*) FROM (SELECT id FROM ${DB}.${TABLE} WHERE MATCH(title, content) AGAINST('倒排索引 tokenizer') LIMIT 20) t;" \
+           "MATCH(title, content)"
+
+log "完成（全部）"
 
 # --------------------------------------------------------------- 8. 缓存命中与否
 # query_cn 在平台上提升 53.5%，query_limit 只有 0.1%。两者都走 DaaT，都应该
