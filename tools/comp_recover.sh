@@ -266,6 +266,15 @@ stage_build() {
   # 本地有未提交改动时它会拒绝而不是把改动丢掉。
   sync_source || die "同步代码失败，先解决网络或本地改动的问题"
 
+  # 先检查 bench 脚本。`local` 用在函数之外语法合法、运行时才报错，
+  # 而报错发生在跑完整轮 bench 之后 —— 一轮编译加一轮 bench 的时间就没了。
+  # 这个检查只要几秒。
+  if [ -f tools/benchmark/check_bench_scripts.py ]; then
+    if ! python3 tools/benchmark/check_bench_scripts.py; then
+      die "bench 脚本检查不通过，先修脚本再编译"
+    fi
+  fi
+
   pkill -f "seekdb --base-dir" 2>/dev/null; sleep 2
 
   # cargo 会向上找 rust/rust-toolchain.toml，发现缺 target 就去补装——

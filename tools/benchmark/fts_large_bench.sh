@@ -314,9 +314,12 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
   # result for each one. The minimum is the honest number here: a run that got
   # unlucky with the merge is not a measurement of the build code. Set it to 1
   # for a single pass.
-  local repeats="${BUILD_REPEATS:-1}"
-  local build_total_sec=""
-  local build_start_ns build_end_ns
+  # This block sits at the top level of the script, so these are plain
+  # assignments: `local` is only valid inside a function.
+  repeats="${BUILD_REPEATS:-1}"
+  build_total_sec=""
+  build_start_ns=""
+  build_end_ns=""
   if [[ "${repeats}" -gt 1 ]]; then
     log "  (build repeated ${repeats}x, keeping the best per index)"
   fi
@@ -324,7 +327,7 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
   build_ik_all_best=""
   build_ik_content_best=""
   build_beng_en_best=""
-  local r
+  r=0
   for ((r = 1; r <= repeats; r++)); do
     # Drop only the indexes, not the data: the data load is the slow part and
     # it does not change between attempts.
@@ -334,7 +337,6 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
     # exist yet would abort before the ADD statements ever run and leave the
     # table without any fulltext index.
     if [[ "${r}" -gt 1 ]]; then
-      local idx
       for idx in fti_all_ik fti_content_ik fti_en_beng; do
         mysql_exec "USE fts_large_bench; ALTER TABLE docs DROP INDEX ${idx};" >/dev/null 2>&1 || true
       done
@@ -349,20 +351,19 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
       "USE fts_large_bench; ALTER TABLE docs ADD FULLTEXT INDEX fti_en_beng(title_en, content_en) WITH PARSER beng;"
     build_end_ns=$(now_ns)
 
-    local total
     total="$(elapsed_sec "${build_start_ns}" "${build_end_ns}")"
     if [[ -z "${build_total_sec}" ]] || awk "BEGIN {exit !(${total} < ${build_total_sec})}"; then
       build_total_sec="${total}"
     fi
     for name in build_ik_all build_ik_content build_beng_en; do
-      local cur best_var="best"
       cur="${METRICS[${name}_sec]}"
+      best_var="best"
       case "${name}" in
         build_ik_all)     best_var="build_ik_all_best" ;;
         build_ik_content) best_var="build_ik_content_best" ;;
         build_beng_en)    best_var="build_beng_en_best" ;;
       esac
-      local best="${!best_var}"
+      best="${!best_var}"
       if [[ -z "${best}" ]] || awk "BEGIN {exit !(${cur} < ${best})}"; then
         printf -v "${best_var}" '%s' "${cur}"
       fi
@@ -380,8 +381,7 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
   # Verify the indexes exist before scoring anything. A dropped or failed
   # index would make every later query report "Can't find FULLTEXT index" and
   # the timings would be the cost of the error, not of the code.
-  local missing=""
-  local check_idx
+  missing=""
   for check_idx in fti_all_ik fti_content_ik fti_en_beng; do
     if ! mysql_exec "USE fts_large_bench; SHOW INDEX FROM docs WHERE Key_name='${check_idx}';" | grep -q "${check_idx}"; then
       missing="${missing} ${check_idx}"
