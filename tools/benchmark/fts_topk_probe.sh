@@ -29,6 +29,16 @@ QUERY_ROUNDS="${QUERY_ROUNDS:-100}"
 
 log() { printf '\n=== %s ===\n' "$*"; }
 
+# Keep a copy of everything this run printed, so the summary at the end can
+# quote the numbers instead of asking the reader to scroll back.
+OUT_FILE="${OUT_FILE:-/tmp/fts_topk_probe_out.txt}"
+: > "${OUT_FILE}"
+exec > >(tee -a "${OUT_FILE}") 2>&1
+
+# Count the statements that failed. A tee writer runs asynchronously, so
+# grepping the file back would race with the last writes.
+FAILED_STMTS=0
+
 mysql_exec() {
   # -N -s：不要列名、tab 分隔
   ${MYSQL} -e "$1" 2>/dev/null | tail -n +1
@@ -37,8 +47,12 @@ mysql_exec() {
 run_timed() {
   # 跑 N 轮，返回平均毫秒（整数微秒累加，避免依赖 bc）
   local sql="$1" rounds="$2" i=0 total=0 start end
-  # 预热
-  ${MYSQL} -e "${sql}" >/dev/null 2>&1
+  # 预热。失败要立刻发现：客户端返回错误时仍会花掉时间，把错误路径的耗时
+  # 当成结果记下来，是这轮探针一开始读到的假数据。
+  if ! ${MYSQL} -e "${sql}" >/dev/null 2>&1; then
+    echo "ERROR"
+    return 1
+  fi
   for ((i = 0; i < rounds; i++)); do
     start=$(date +%s%N)
     ${MYSQL} -e "${sql}" >/dev/null 2>&1
@@ -54,7 +68,33 @@ log "环境"
 echo "  mysql: ${MYSQL}"
 echo "  rounds: ${QUERY_ROUNDS}"
 mysql_exec "SELECT VERSION();" | sed 's/^/  version: /'
-mysql_exec "SELECT COUNT(*) FROM ${DB}.${TABLE};" | sed 's/^/  rows: /'
+
+# The probe measures timings, so it must refuse to run against a table that is
+# not set up. Without the index every MATCH fails with "Can't find FULLTEXT
+# index", and the timings that come back are the cost of the error path: fast,
+# meaningless and easy to misread as a result.
+#
+# Check the database, the rows and the index before anything else, and stop
+# with a message that says what is missing.
+if ! mysql_exec "SELECT COUNT(*) FROM ${DB}.${TABLE};" | tail -1 | grep -qE '^[0-9]+$'; then
+  echo "!! 表 ${DB}.${TABLE} 不存在或不可读。先跑 tools/comp_recover.sh bench clean 建好数据。" >&2
+  exit 1
+fi
+rows=$(mysql_exec "SELECT COUNT(*) FROM ${DB}.${TABLE};" | tail -1)
+echo "  rows: ${rows}"
+if [[ "${rows}" -eq 0 ]]; then
+  echo "!! 表 ${DB}.${TABLE} 是空的。先跑 tools/comp_recover.sh bench clean 灌数据。" >&2
+  exit 1
+fi
+
+# The probe matches on ${TABLE}.content, so the index has to cover that column.
+idx_list=$(mysql_exec "SHOW INDEX FROM ${DB}.${TABLE};" | awk '{print $3}' | sort -u | tr '\n' ' ')
+echo "  indexes: ${idx_list}"
+if ! mysql_exec "SHOW INDEX FROM ${DB}.${TABLE};" | grep -q "fti_content_ik"; then
+  echo "!! 缺少全文索引 fti_content_ik（MATCH(content) 需要它）。" >&2
+  echo "   先跑 tools/comp_recover.sh bench clean 建好索引。" >&2
+  exit 1
+fi
 
 # --------------------------------------------------------------- 1. LIMIT 生效性
 log "1. LIMIT 是否让扫描提前停（同一 MATCH，只改 LIMIT）"
@@ -68,7 +108,12 @@ for lim in 20 100 1000 8001 0; do
   fi
   hits=$(mysql_exec "${sql}" | tail -1)
   ms=$(run_timed "${sql}" "${QUERY_ROUNDS}")
-  printf '  %-18s hits=%-8s avg=%.4f ms\n' "${label}" "${hits:-?}" "${ms}"
+  if [[ "${hits}" =~ ^[0-9]+$ ]]; then
+    printf '  %-18s hits=%-8s avg=%s ms\n' "${label}" "${hits}" "${ms}"
+  else
+    FAILED_STMTS=$((FAILED_STMTS + 1))
+    printf '  %-18s hits=FAIL   avg=%s ms   <== 无效，语句执行失败\n' "${label}" "${ms}"
+  fi
 done
 
 # --------------------------------------------------------------- 2. topk vs daat
@@ -81,7 +126,12 @@ for shape in \
   "SELECT id FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('${MATCH_WORDS}') LIMIT 20;" ; do
   ms=$(run_timed "${shape}" "${QUERY_ROUNDS}")
   hits=$(mysql_exec "${shape}" | tail -1)
-  printf '  avg=%.4f ms  hits=%-8s  %s\n' "${ms}" "${hits:-?}" "${shape:0:70}"
+  if [[ "${hits}" =~ ^[0-9]+$ ]]; then
+    printf '  avg=%s ms  hits=%-8s  %s\n' "${ms}" "${hits}" "${shape:0:70}"
+  else
+    FAILED_STMTS=$((FAILED_STMTS + 1))
+    printf '  avg=%s ms  hits=FAIL   %s   <== 无效\n' "${ms}" "${shape:0:70}"
+  fi
 done
 
 # --------------------------------------------------------------- 3. 纯 MATCH 计数
@@ -89,7 +139,11 @@ log "3. 对照：MATCH 命中总数（无 LIMIT、无子查询）"
 sql="SELECT COUNT(*) FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('${MATCH_WORDS}');"
 hits=$(mysql_exec "${sql}" | tail -1)
 ms=$(run_timed "${sql}" "${QUERY_ROUNDS}")
-printf '  avg=%.4f ms  hits=%s\n' "${ms}" "${hits}"
+if [[ "${hits}" =~ ^[0-9]+$ ]]; then
+  printf '  avg=%s ms  hits=%s\n' "${ms}" "${hits}"
+else
+  printf '  avg=%s ms  hits=FAIL   <== 无效，语句执行失败\n' "${ms}"
+fi
 
 # --------------------------------------------------------------- 4. 计划
 log "4. 执行计划（确认走哪种检索路径）"
@@ -179,7 +233,12 @@ timed_hits() {
   local sql="$1" label="$2" hits ms
   hits=$(mysql_exec "${sql}" | tail -1)
   ms=$(run_timed "${sql}" "${QUERY_ROUNDS}")
-  printf '  %-34s hits=%-8s avg=%.4f ms\n' "${label}" "${hits:-?}" "${ms}"
+  if [[ "${hits}" =~ ^[0-9]+$ ]]; then
+    printf '  %-34s hits=%-8s avg=%s ms\n' "${label}" "${hits}" "${ms}"
+  else
+    FAILED_STMTS=$((FAILED_STMTS + 1))
+    printf '  %-34s hits=FAIL   avg=%s ms   <== 无效，语句执行失败\n' "${label}" "${ms}"
+  fi
 }
 
 echo "  9a. 同样的 LIMIT 20，query token 数不同"
@@ -205,6 +264,34 @@ timed_hits "SELECT COUNT(*) FROM (SELECT id FROM ${DB}.${TABLE} WHERE MATCH(cont
            "MATCH(content)"
 timed_hits "SELECT COUNT(*) FROM (SELECT id FROM ${DB}.${TABLE} WHERE MATCH(title, content) AGAINST('倒排索引 tokenizer') LIMIT 20) t;" \
            "MATCH(title, content)"
+
+# --------------------------------------------------------------- 10. 本轮结果有效性
+# 一次性把「哪些数字能用」说清楚，而不是让读的人自己逐行判断。
+log "10. 本轮结果有效性"
+
+fail_count="${FAILED_STMTS}"
+
+echo "  10a. 语句失败次数"
+printf '    hits=FAIL 出现 %s 次\n' "${fail_count}"
+if [[ "${fail_count}" -gt 0 ]]; then
+  echo "    >>> 本轮有语句执行失败，上面的耗时是错误路径的耗时，不能用。"
+  echo "    >>> 失败原因通常是索引缺失，先确认 build 是否成功。"
+fi
+
+echo "  10b. 关键结论"
+if [[ "${fail_count}" -eq 0 ]]; then
+  echo "    所有语句均成功，下面的耗时可用。"
+fi
+
+# 把关键对照拉出来，省得从长输出里找
+echo "  10c. LIMIT 生效性（同一 MATCH，只改 LIMIT）"
+grep -E "LIMIT (20|100|1000|8001) |无 LIMIT" /tmp/fts_topk_probe_out.txt 2>/dev/null | sed 's/^/    /'
+
+echo "  10d. token 数 vs 行数"
+grep -E "token（|token LIMIT|token 无 LIMIT|MATCH\(" /tmp/fts_topk_probe_out.txt 2>/dev/null | sed 's/^/    /'
+
+echo "  10e. 倒排链缓存"
+grep -E "cached :|hit    :" /tmp/fts_topk_probe_out.txt 2>/dev/null | sed 's/^/    /'
 
 log "完成（全部）"
 

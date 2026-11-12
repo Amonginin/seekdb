@@ -328,10 +328,17 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
   for ((r = 1; r <= repeats; r++)); do
     # Drop only the indexes, not the data: the data load is the slow part and
     # it does not change between attempts.
-    mysql_exec "USE fts_large_bench;
-      ALTER TABLE docs DROP INDEX fti_all_ik;
-      ALTER TABLE docs DROP INDEX fti_content_ik;
-      ALTER TABLE docs DROP INDEX fti_en_beng;" >/dev/null 2>&1
+    #
+    # Each DROP runs on its own. The client sends a batch of statements and
+    # stops at the first failure, so a batch that drops an index which does not
+    # exist yet would abort before the ADD statements ever run and leave the
+    # table without any fulltext index.
+    if [[ "${r}" -gt 1 ]]; then
+      local idx
+      for idx in fti_all_ik fti_content_ik fti_en_beng; do
+        mysql_exec "USE fts_large_bench; ALTER TABLE docs DROP INDEX ${idx};" >/dev/null 2>&1 || true
+      done
+    fi
 
     build_start_ns=$(now_ns)
     time_mysql_command "build_ik_all" \
@@ -369,6 +376,23 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
     log "  best of ${repeats}: ik_all=${build_ik_all_best} content=${build_ik_content_best} beng=${build_beng_en_best}"
   fi
   METRICS[build_total_sec]="${build_total_sec}"
+
+  # Verify the indexes exist before scoring anything. A dropped or failed
+  # index would make every later query report "Can't find FULLTEXT index" and
+  # the timings would be the cost of the error, not of the code.
+  local missing=""
+  local check_idx
+  for check_idx in fti_all_ik fti_content_ik fti_en_beng; do
+    if ! mysql_exec "USE fts_large_bench; SHOW INDEX FROM docs WHERE Key_name='${check_idx}';" | grep -q "${check_idx}"; then
+      missing="${missing} ${check_idx}"
+    fi
+  done
+  if [[ -n "${missing}" ]]; then
+    log "ERROR: 这些全文索引在 build 之后不存在：${missing}"
+    log "       后续查询会全部失败，本轮结果无效。"
+    exit 1
+  fi
+  log "  三个全文索引均已就绪"
 else
   log "[1-3/5] SKIP_LOAD=1, reuse existing fts_large_bench.docs and indexes"
   loaded=$(mysql_exec "USE fts_large_bench; SELECT COUNT(*) FROM docs;" 2>/dev/null | tail -1 || echo "0")

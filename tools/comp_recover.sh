@@ -489,6 +489,20 @@ stage_bench() {
   grep -E "select1_avg_ms:|raw_load_sec:|build_.*_sec:|tokenize_.*_avg_ms:|query_.*(avg_ms|hits):" \
     "${out}" | tail -16 | sed 's/^/  /'
 
+  # A bench run that lost the indexes reports zero for every hit count, and the
+  # timings that come back are the cost of the error path. Say so instead of
+  # letting a broken run look like a good one.
+  local bad_hits
+  bad_hits=$(grep -E "^(query_cn_hits|query_beng_hits|query_mixed_hits|query_limit_hits):" "${out}" \
+    | grep -vE ":[[:space:]]*[1-9][0-9]*$" | head -4)
+  if [ -n "${bad_hits}" ]; then
+    log "!! 命中行数为 0 或缺失，本轮查询结果无效："
+    printf '%s\n' "${bad_hits}" | sed 's/^/     /'
+  fi
+  local expected
+  expected=$(grep -E "^(query_cn_hits|query_beng_hits|query_mixed_hits|query_limit_hits):" "${out}" | tr -s ' ' | cut -d' ' -f2 | tr '\n' ' ')
+  log "命中行数: ${expected:-无}" 
+
   # raw_load 是「这一轮可不可信」的哨兵：它在所有 ALTER 之前，不受 build 代码影响。
   local rl
   rl=$(grep -m1 "raw_load_sec:" "${out}" | awk '{print $2}')
