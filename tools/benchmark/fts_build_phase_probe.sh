@@ -57,6 +57,31 @@ echo "client: ${CLIENT}"
 echo "database: ${DB}  rounds: ${ROUNDS}"
 echo
 
+# 先自检：确认 tokenize 可用、BENCHMARK 可用、表里有数据。
+# 这三个任一不成立，后面的计时就没有意义，提前报出来比跑完才发现好。
+check_tokenize="$(sql "SELECT tokenize('测试文本', 'ik');")"
+if [ -z "${check_tokenize}" ]; then
+  echo "!! tokenize('测试文本','ik') 没有返回结果，分词函数不可用或参数不对" >&2
+  exit 1
+fi
+echo "tokenize 自检: ${check_tokenize}"
+
+check_benchmark="$(sql "SELECT BENCHMARK(10, 1+1);")"
+if [ -z "${check_benchmark}" ]; then
+  echo "!! BENCHMARK() 不可用，本探针依赖它做进程内循环" >&2
+  echo "   替代方案：手工把 tokenize 包进存储过程循环，或告诉我，我换一种测法" >&2
+  exit 1
+fi
+echo "BENCHMARK 自检: 可用"
+
+doc_count="$(sql "SELECT COUNT(*) FROM ${DB}.docs;")"
+if [ -z "${doc_count}" ] || [ "${doc_count}" -lt 100 ] 2>/dev/null; then
+  echo "!! ${DB}.docs 里只有 '${doc_count}' 行，先跑一次 bench 造数据" >&2
+  exit 1
+fi
+echo "表内文档数: ${doc_count}"
+echo
+
 # 找一篇长度接近中位的文档
 read -r DOC_ID DOC_LEN < <(sql "
   SELECT id, CHAR_LENGTH(content) FROM ${DB}.docs
