@@ -17,6 +17,7 @@
 #include "object/ob_object.h"
 #define USING_LOG_PREFIX STORAGE_FTS
 
+#include "lib/time/ob_time_utility.h"
 #include "share/rc/ob_server_runtime.h"
 #include "storage/fts/ob_fts_stop_word.h"
 #include "storage/fts/ob_fts_parser_helper.h"
@@ -26,6 +27,39 @@ namespace oceanbase
 {
 namespace storage
 {
+
+// The tokenization cost splits into three parts and the split has to be
+// measured rather than guessed: the dictionary lookup that produces the
+// tokens, the stop word check that runs per token, and the aggregation that
+// groups the words into the posting rows.
+//
+// The stop word check looked like the cheapest of the three on paper - the
+// table has 37 buckets - but it converts the charset of every single token and
+// builds an arena allocator for it, so it may well be the expensive one.
+static thread_local int64_t tl_stopword_check_us = 0;
+static thread_local int64_t tl_stopword_check_cnt = 0;
+static thread_local int64_t tl_groupby_us = 0;
+static thread_local int64_t tl_groupby_cnt = 0;
+
+void ObFtsTokenizeTiming::report()
+{
+  if (0 == tl_stopword_check_cnt && 0 == tl_groupby_cnt) {
+    return;
+  }
+  LOG_INFO("fts tokenize internals timing",
+           "stopword_us", tl_stopword_check_us,
+           "stopword_cnt", tl_stopword_check_cnt,
+           "stopword_ns_per_word", tl_stopword_check_cnt > 0
+               ? tl_stopword_check_us * 1000 / tl_stopword_check_cnt : 0,
+           "groupby_us", tl_groupby_us,
+           "groupby_cnt", tl_groupby_cnt,
+           "groupby_ns_per_word", tl_groupby_cnt > 0
+               ? tl_groupby_us * 1000 / tl_groupby_cnt : 0);
+  tl_stopword_check_us = 0;
+  tl_stopword_check_cnt = 0;
+  tl_groupby_us = 0;
+  tl_groupby_cnt = 0;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // class ObStopWordChecker
@@ -74,8 +108,9 @@ void ObStopWordChecker::destroy()
 int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
 {
   int ret = OB_SUCCESS;
-  
-  
+
+
+  const int64_t begin_us = common::ObTimeUtility::current_time();
   common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
@@ -105,6 +140,8 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
       }
     }
   }
+  tl_stopword_check_us += common::ObTimeUtility::current_time() - begin_us;
+  ++tl_stopword_check_cnt;
   return ret;
 }
 
@@ -213,6 +250,7 @@ int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
 {
   int ret = OB_SUCCESS;
   int64_t word_count = 0;
+  const int64_t begin_us = common::ObTimeUtility::current_time();
   if (OB_UNLIKELY(word.empty() || word_freq <= 0)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (!flag_.groupby_word()) {
@@ -233,6 +271,8 @@ int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
     if (OB_FAIL(word_map_.set_refactored(word, word_count, 1/*overwrite*/))) {
     }
   }
+  tl_groupby_us += common::ObTimeUtility::current_time() - begin_us;
+  ++tl_groupby_cnt;
   return ret;
 }
 

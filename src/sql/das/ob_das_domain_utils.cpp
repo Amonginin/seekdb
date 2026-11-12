@@ -23,6 +23,7 @@
 
 #include "ob_das_domain_utils.h"
 #include "data_plane/blocksstable/ob_datum_row.h"
+#include "storage/fts/ob_fts_stop_word.h"
 #include "data_plane/access/ob_datum_reshape.h"
 #include "share/geo/ob_geo_utils.h"
 #include "sql/das/ob_das_dml_vec_iter.h"
@@ -375,6 +376,9 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
                "avg_us_per_doc", tl_rows_us / tl_rows_docs,
                "seg_us_per_doc", tl_fts_segment_us / tl_rows_docs,
                "avg_ns_per_posting", tl_rows_postings > 0 ? tl_rows_us * 1000 / tl_rows_postings : 0);
+      // The split inside the tokenizer: the dictionary lookup that produced the
+      // tokens, the stop word check that ran per token, and the aggregation.
+      storage::ObFtsTokenizeTiming::report();
     }
   }
   return ret;

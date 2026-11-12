@@ -70,6 +70,15 @@ static const char ob_stop_word_list[][FTS_STOP_WORD_MAX_LENGTH] = {
   "www"
 };
 
+// Reports the split of the per-token cost between the stop word check and the
+// word aggregation, and resets the counters. The caller decides when to report
+// so that a bench run gets one line per batch instead of one per word.
+class ObFtsTokenizeTiming final
+{
+public:
+  static void report();
+};
+
 class ObStopWordChecker final
 {
 public:
