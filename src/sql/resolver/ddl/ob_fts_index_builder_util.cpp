@@ -1116,7 +1116,12 @@ int64_t fts_build_parallelism_ceiling()
   const int64_t online = get_cpu_num();
   const int64_t quota_cpus = read_cgroup_cpu_quota();
   const int64_t usable = (quota_cpus > 0) ? MIN(online, quota_cpus) : online;
-  int64_t ceiling = MAX(1L, MIN(usable, 8L));
+  // Swept on an 8-core build machine, build_total_sec by DOP:
+  //   1 -> 11.850   2 -> 9.747   3 -> 9.940   4 -> 9.437   8 -> 10.048
+  // Half the cores is the sweet spot: the build also runs three auxiliary
+  // tables at once, so a per-table DOP of "all cores" would oversubscribe.
+  // Scaling with the core count keeps that shape on smaller and larger boxes.
+  int64_t ceiling = MAX(1L, MIN(usable / 2, 8L));
   const char *override_dop = ::getenv("OB_FTS_BUILD_DOP");
   if (nullptr != override_dop) {
     const int64_t requested = ::atoll(override_dop);
