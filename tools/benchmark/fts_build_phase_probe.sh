@@ -21,11 +21,15 @@ PORT="${SEEKDB_PORT:-2881}"
 DB="${SEEKDB_DATABASE:-fts_large_bench}"
 ROUNDS="${ROUNDS:-2000}"
 
+SRC_DIR="${SRC_DIR:-/tmp/seekdb}"
+
 find_client() {
   local candidate
+  # The bundled client lives under deps/3rd/u01/obclient and needs its own libs,
+  # which is why comp_recover.sh exports LD_LIBRARY_PATH before using it.
   for candidate in \
-    /tmp/seekdb/deps/3rd/usr/bin/obclient \
-    /tmp/seekdb/build_release/src/observer/obclient \
+    "${SRC_DIR}/deps/3rd/u01/obclient/bin/obclient" \
+    "${SRC_DIR}/deps/3rd/u01/obclient/bin/mysql" \
     "$(command -v obclient 2>/dev/null || true)" \
     "$(command -v mysql 2>/dev/null || true)"; do
     if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then
@@ -36,7 +40,12 @@ find_client() {
   return 1
 }
 
-CLIENT="$(find_client)" || { echo "找不到 obclient/mysql 客户端" >&2; exit 1; }
+CLIENT="$(find_client)" || {
+  echo "找不到 obclient/mysql 客户端" >&2
+  echo "已尝试：${SRC_DIR}/deps/3rd/u01/obclient/bin/{obclient,mysql} 以及 PATH" >&2
+  exit 1
+}
+export LD_LIBRARY_PATH="${SRC_DIR}/deps/3rd/u01/obclient/lib:${LD_LIBRARY_PATH:-}"
 
 sql() {
   "${CLIENT}" -h127.0.0.1 -P"${PORT}" -uroot -N -s --protocol=tcp \
@@ -83,9 +92,11 @@ echo "表内文档数: ${doc_count}"
 echo
 
 # 找一篇长度接近中位的文档
-read -r DOC_ID DOC_LEN < <(sql "
+DOC_ID=""
+DOC_LEN=""
+read -r DOC_ID DOC_LEN <<< "$(sql "
   SELECT id, CHAR_LENGTH(content) FROM ${DB}.docs
-  ORDER BY CHAR_LENGTH(content) LIMIT 1 OFFSET 10000;" | tr '\t' ' ')
+  ORDER BY CHAR_LENGTH(content) LIMIT 1 OFFSET 10000;" | tr '\t' ' ')" || true
 
 if [ -z "${DOC_ID:-}" ]; then
   echo "!! 取不到文档。先跑一次 bench，让 ${DB}.docs 有数据。" >&2
