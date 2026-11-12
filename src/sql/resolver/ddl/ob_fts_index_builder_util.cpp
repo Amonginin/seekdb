@@ -1107,14 +1107,25 @@ int64_t read_cgroup_cpu_quota()
 
 // The hard cap of 8 is kept: going wider than that was measured to be slower
 // even on a real 8-core machine, because the build is memory bound near the end.
+//
+// OB_FTS_BUILD_DOP overrides the value so a bench run can sweep the slice count
+// without rebuilding. It is only read here, only affects this build, and falls
+// back to the measured default when unset or unparsable.
 int64_t fts_build_parallelism_ceiling()
 {
   const int64_t online = get_cpu_num();
   const int64_t quota_cpus = read_cgroup_cpu_quota();
   const int64_t usable = (quota_cpus > 0) ? MIN(online, quota_cpus) : online;
-  const int64_t ceiling = MAX(1L, MIN(usable, 8L));
+  int64_t ceiling = MAX(1L, MIN(usable, 8L));
+  const char *override_dop = ::getenv("OB_FTS_BUILD_DOP");
+  if (nullptr != override_dop) {
+    const int64_t requested = ::atoll(override_dop);
+    if (requested > 0) {
+      ceiling = requested;
+    }
+  }
   // Log once per decision so a bench run can tell whether the build was capped
-  // by the container quota or by the hard cap.
+  // by the container quota, by the hard cap, or by the override.
   LOG_INFO("fts build parallelism ceiling", K(online), K(quota_cpus), K(ceiling));
   return ceiling;
 }
