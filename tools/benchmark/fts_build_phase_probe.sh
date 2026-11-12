@@ -23,6 +23,10 @@ ROUNDS="${ROUNDS:-2000}"
 
 SRC_DIR="${SRC_DIR:-/tmp/seekdb}"
 
+# 自报版本：这几轮踩过「fetch 没拉到新提交，跑的还是旧脚本」，
+# 把脚本所属的 commit 打出来，一眼能看出跑的是哪一版。
+PROBE_REV="$(git -C "${SRC_DIR}" log -1 --format='%h %s' -- tools/benchmark/fts_build_phase_probe.sh 2>/dev/null || echo unknown)"
+
 find_client() {
   local candidate
   # The bundled client lives under deps/3rd/u01/obclient and needs its own libs,
@@ -37,15 +41,30 @@ find_client() {
       return 0
     fi
   done
+  # Last resort: the layout has moved between dependency bundles before, so look
+  # for the binary instead of assuming one path.
+  for candidate in \
+    "$(find "${SRC_DIR}/deps" -maxdepth 6 -type f -name obclient 2>/dev/null | head -1)" \
+    "$(find "${SRC_DIR}/deps" -maxdepth 6 -type f -name mysql 2>/dev/null | head -1)"; do
+    if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then
+      echo "${candidate}"
+      return 0
+    fi
+  done
   return 1
 }
 
 CLIENT="$(find_client)" || {
   echo "找不到 obclient/mysql 客户端" >&2
-  echo "已尝试：${SRC_DIR}/deps/3rd/u01/obclient/bin/{obclient,mysql} 以及 PATH" >&2
+  echo "已尝试：" >&2
+  echo "  ${SRC_DIR}/deps/3rd/u01/obclient/bin/{obclient,mysql}" >&2
+  echo "  PATH 上的 obclient / mysql" >&2
+  echo "  ${SRC_DIR}/deps 下任意深度名为 obclient / mysql 的文件" >&2
+  echo "实际 deps 目录结构：" >&2
+  ls -d "${SRC_DIR}"/deps/* 2>/dev/null | head -10 >&2
   exit 1
 }
-export LD_LIBRARY_PATH="${SRC_DIR}/deps/3rd/u01/obclient/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$(dirname "$(dirname "${CLIENT}")")/lib:${LD_LIBRARY_PATH:-}"
 
 sql() {
   "${CLIENT}" -h127.0.0.1 -P"${PORT}" -uroot -N -s --protocol=tcp \
@@ -62,6 +81,7 @@ time_ms() {
 }
 
 echo "== 探针：分词成本占比 =="
+echo "脚本版本: ${PROBE_REV}"
 echo "client: ${CLIENT}"
 echo "database: ${DB}  rounds: ${ROUNDS}"
 echo
