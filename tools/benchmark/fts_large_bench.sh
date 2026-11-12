@@ -57,6 +57,13 @@ BENG_TEXT="The quick brown fox jumps over the lazy dog. Full-text search indexin
 
 declare -A METRICS
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fts_large_bench.XXXXXX")"
+# observer 进程 pid：CPU 秒与并行度指标要用。取不到就只报耗时，不影响压测本身。
+OBSERVER_PID=""
+if command -v pgrep >/dev/null 2>&1; then
+  OBSERVER_PID="$(pgrep -f 'seekdb --base-dir' 2>/dev/null | head -1)"
+elif command -v pidof >/dev/null 2>&1; then
+  OBSERVER_PID="$(pidof seekdb 2>/dev/null | awk '{print $1}')"
+fi
 
 cleanup() { rm -rf "${TMP_DIR}"; }
 trap cleanup EXIT
@@ -196,81 +203,132 @@ run_query_bench() {
   run_repeated_sql_bench "${name}" "${QUERY_ROUNDS}" "${sql}"
 }
 
+# observer 进程累计 CPU 时间（单位：时钟滴答）。utime+stime 对全部线程求和。
+# 字段偏移：/proc/<pid>/task/<tid>/stat 的第 2 个字段 comm 可能含空格和括号，
+# 所以先删掉到最后一个 ') ' 为止的前缀，剩下的字段就从 state 开始，utime 变成第 12 个。
+proc_cpu_ticks() {
+  local pid="$1"
+  local files=(/proc/"${pid}"/task/*/stat)
+  # 一次 awk 吃掉全部线程：几百个线程时，逐文件 fork awk 会把采样开销做到秒级。
+  awk '{ sub(/^.*\) /, ""); s += $12 + $13 } END { printf "%.0f", s + 0 }' "${files[@]}" 2>/dev/null
+}
+
+proc_thread_count() {
+  local pid="$1"
+  ls -1 /proc/"${pid}"/task 2>/dev/null | wc -l
+}
+
+# 一次 ALTER 的耗时之外，再记两个数：
+#   build_xxx_cpu_sec = 这一次 ALTER 烧掉多少 CPU 秒
+#   build_xxx_cores   = cpu_sec / wall，也就是「实际吃了几核」
+# 这两个数把「并行到底有没有生效」变成可直接读的指标，不需要任何 profiler：
+#   cores ≈ 1   → 建索引其实是单线程，DOP 参数是空转，要往并行链路查
+#   cores ≈ DOP → 真的并行，瓶颈在单核效率，要往热函数查
 time_mysql_command() {
   local name="$1" sql="$2"
   local start_ns end_ns total_sec
+  local ticks0="" ticks1="" cpu_sec="" cores="" hz
+  hz="$(getconf CLK_TCK 2>/dev/null || echo 100)"
+  if [ -n "${OBSERVER_PID}" ] && [ -d "/proc/${OBSERVER_PID}" ]; then
+    ticks0="$(proc_cpu_ticks "${OBSERVER_PID}")"
+  fi
   start_ns=$(now_ns)
   mysql_exec "${sql}" >/dev/null
   end_ns=$(now_ns)
+  if [ -n "${ticks0}" ] && [ -d "/proc/${OBSERVER_PID}" ]; then
+    ticks1="$(proc_cpu_ticks "${OBSERVER_PID}")"
+    cpu_sec="$(awk -v a="${ticks0}" -v b="${ticks1}" -v hz="${hz}" 'BEGIN { printf "%.3f", (b - a) / hz }')"
+  fi
   total_sec=$(elapsed_sec "${start_ns}" "${end_ns}")
   METRICS["${name}_sec"]="${total_sec}"
-  log "  ${name}: ${total_sec}s"
+  if [ -n "${cpu_sec}" ]; then
+    cores="$(awk -v c="${cpu_sec}" -v t="${total_sec}" 'BEGIN { if (t > 0) printf "%.2f", c / t; else printf "0" }')"
+    METRICS["${name}_cpu_sec"]="${cpu_sec}"
+    METRICS["${name}_cores"]="${cores}"
+    log "  ${name}: ${total_sec}s  cpu=${cpu_sec}s  cores=${cores}"
+  else
+    log "  ${name}: ${total_sec}s"
+  fi
 }
 
 # ---------------------------------------------------------------- build profiling
-# PROFILE_BUILD=1：在三次 ALTER 期间给 observer 采样，回答「build 的 4.2s/索引 到底花在哪个函数」。
+# PROFILE_BUILD=1：在三次 ALTER 期间给 observer 采样，回答「build 的 4~6s/索引 到底花在哪个函数」。
 #
-# 为什么需要它：build 占评分 coeff 的 52%，但我们只知道「写行 300K 行/秒」这一个间接数字，
-# 分不清是分词、组行、还是插入路径的行开销。靠猜已经错过两次（分词不是瓶颈、relevance 是承重墙），
-# 所以先采样再动手。
+# 为什么需要它：build 占评分 coeff 的 52%，而我们只知道「写行 300K 行/秒」这一个间接数字，
+# 分不清是分词、组行、还是插入路径的行开销。靠猜已经错过两次（分词不是瓶颈、relevance 是承重墙）。
 #
-# 有 perf 用 perf；没有 perf 退化成 gdb 采样（poor man's profiler）。
-PROFILE_MODE=""
+# 2026-11-12 实测教训：gdb 采样会 ptrace 停住整个进程，build 从 12s 变成 992s（80 倍），
+# 采到的全是空闲线程的 futex / cond_wait，彻底不可用。所以 gdb 只在显式 PROFILE_GDB=1
+# 时启用，且限制在 20 个样本；默认要求 perf，没有就立刻失败并给安装命令。
+PROFILE_KIND=""
 PROFILE_DATA=""
 PROFILE_JOB=""
 PROFILE_PID=""
+PROFILE_GDB="${PROFILE_GDB:-0}"
 
-profile_start() {
+profile_precheck() {
   PROFILE_PID="$(pgrep -f 'seekdb --base-dir' | head -1)"
   if [[ -z "${PROFILE_PID}" ]]; then
-    PROFILE_MODE="none"
-    log "  [profile] 找不到 observer 进程（seekdb --base-dir ...），跳过采样"
+    log "ERROR: PROFILE_BUILD=1 但找不到 observer 进程（seekdb --base-dir ...）"
+    exit 1
+  fi
+  if command -v perf >/dev/null 2>&1; then
+    PROFILE_KIND="perf"
     return 0
   fi
-  : > "${TMP_DIR}/profile.stop"
-  rm -f "${TMP_DIR}/profile.stop"
-  if command -v perf >/dev/null 2>&1; then
-    PROFILE_MODE="perf"
-    PROFILE_DATA="${TMP_DIR}/perf_build.data"
-    rm -f "${PROFILE_DATA}"
-    # 不带子命令时 perf 会一直采样到收到 SIGINT，正好卡住三次 ALTER 的窗口。
-    perf record -F 499 -g -p "${PROFILE_PID}" -o "${PROFILE_DATA}" >/dev/null 2>&1 &
-    PROFILE_JOB=$!
-    sleep 1
-    if ! kill -0 "${PROFILE_JOB}" 2>/dev/null; then
-      PROFILE_MODE="none"
-      log "  [profile] perf 启动失败（多为 perf_event_paranoid 限制），尝试：sysctl -w kernel.perf_event_paranoid=-1"
-      return 0
-    fi
-    log "  [profile] perf 采样中 pid=${PROFILE_PID} 频率=499Hz"
-  elif command -v gdb >/dev/null 2>&1; then
-    PROFILE_MODE="gdb"
-    PROFILE_DATA="${TMP_DIR}/gdb_samples.txt"
-    : > "${PROFILE_DATA}"
-    (
-      while [[ ! -f "${TMP_DIR}/profile.stop" ]]; do
-        gdb -p "${PROFILE_PID}" -batch -ex "thread apply all bt 10" 2>/dev/null >> "${PROFILE_DATA}"
-        echo "----SAMPLE----" >> "${PROFILE_DATA}"
-        sleep 0.2
-      done
-    ) &
-    PROFILE_JOB=$!
-    log "  [profile] 没有 perf，改用 gdb 采样 pid=${PROFILE_PID}（每 0.2s 一次全线程栈）"
-  else
-    PROFILE_MODE="none"
-    log "  [profile] perf 和 gdb 都没有，无法采样。装一个：apt-get install -y linux-tools-generic 或 gdb"
+  if [[ "${PROFILE_GDB}" == "1" ]] && command -v gdb >/dev/null 2>&1; then
+    PROFILE_KIND="gdb"
+    log "  [profile] 警告：gdb 采样会把 build 拖慢两个数量级，这一轮的耗时数字不可用（只取热点）"
+    return 0
   fi
+  log "ERROR: 没有 perf，无法采样。在实例上装一个："
+  log "    apt-get update -qq && apt-get install -y linux-tools-common linux-tools-generic"
+  log "    # 若提示 perf 与内核不匹配：apt-get install -y linux-perf"
+  log "    perf --version && sysctl -w kernel.perf_event_paranoid=-1"
+  log "  仍不行时可退化为 gdb 粗采样（耗时数字会失真）：PROFILE_GDB=1 bash tools/comp_recover.sh prof"
+  exit 1
+}
+
+profile_start() {
+  PROFILE_DATA="${TMP_DIR}/profile_samples.txt"
+  : > "${PROFILE_DATA}"
+  case "${PROFILE_KIND}" in
+    perf)
+      rm -f "${PROFILE_DATA}"
+      # 不带子命令时 perf 会一直采样到 SIGINT，正好覆盖三次 ALTER 的窗口。
+      perf record -F 499 -g -p "${PROFILE_PID}" -o "${PROFILE_DATA}" >/dev/null 2>&1 &
+      PROFILE_JOB=$!
+      sleep 1
+      if ! kill -0 "${PROFILE_JOB}" 2>/dev/null; then
+        log "  [profile] perf 启动失败，多半是 perf_event_paranoid 限制：sysctl -w kernel.perf_event_paranoid=-1"
+        PROFILE_KIND=""
+        return 0
+      fi
+      log "  [profile] perf 采样中 pid=${PROFILE_PID} 频率=499Hz 带调用图"
+      ;;
+    gdb)
+      (
+        for _ in $(seq 1 20); do
+          gdb -p "${PROFILE_PID}" -batch -ex "thread apply all bt 8" 2>/dev/null >> "${PROFILE_DATA}"
+          echo "----SAMPLE----" >> "${PROFILE_DATA}"
+          sleep 0.5
+        done
+      ) &
+      PROFILE_JOB=$!
+      log "  [profile] gdb 采样中 pid=${PROFILE_PID}（最多 20 个样本）"
+      ;;
+  esac
 }
 
 profile_stop() {
-  case "${PROFILE_MODE}" in
+  case "${PROFILE_KIND}" in
     perf)
       kill -INT "${PROFILE_JOB}" 2>/dev/null
       wait "${PROFILE_JOB}" 2>/dev/null
       log "  [profile] 采样结束 -> ${PROFILE_DATA}"
       ;;
     gdb)
-      : > "${TMP_DIR}/profile.stop"
+      # 采样进程自己跑完 20 个样本就退出；这里只等它，不强杀（强杀会留下半截栈）。
       wait "${PROFILE_JOB}" 2>/dev/null
       log "  [profile] 采样结束 -> ${PROFILE_DATA}"
       ;;
@@ -278,25 +336,28 @@ profile_stop() {
 }
 
 profile_report() {
-  case "${PROFILE_MODE}" in
+  case "${PROFILE_KIND}" in
     perf)
       if [[ ! -s "${PROFILE_DATA}" ]]; then
-        log "  [profile] 没有采到样本"
+        log "  [profile] 没采到样本"
         return 0
       fi
-      log "  ---- perf 平面报告（叶子函数，按自身 CPU 占比）----"
+      log "  ---- perf 平面报告（叶子函数自身 CPU 占比）----"
       perf report --stdio -i "${PROFILE_DATA}" --sort symbol --percent-limit 1 2>/dev/null | sed -n '1,45p'
-      log "  ---- perf 按 dso+symbol（看是 observer 自身还是 libc/第三方）----"
+      log "  ---- perf 按 dso+symbol（区分 observer 自身 / libc / 第三方）----"
       perf report --stdio -i "${PROFILE_DATA}" --sort dso,symbol --percent-limit 1 2>/dev/null | sed -n '1,30p'
       ;;
     gdb)
       if [[ ! -s "${PROFILE_DATA}" ]]; then
-        log "  [profile] 没有采到样本"
+        log "  [profile] 没采到样本"
         return 0
       fi
-      log "  ---- gdb 采样热点（帧出现次数，粗粒度）----"
+      log "  ---- gdb 采样热点（已剔除 futex/cond_wait/nanosleep 等空闲帧）----"
       grep -oE ' in [A-Za-z_][A-Za-z0-9_:<>~]*' "${PROFILE_DATA}" \
-        | sed 's/^ in //' | sort | uniq -c | sort -rn | head -30
+        | sed 's/^ in //' \
+        | grep -vE '^(futex|__pthread_cond_wait_common|__GI___nanosleep|__GI___clock_nanosleep|usleep|clone|start_thread|__GI___poll|epoll_wait|__select|select)$' \
+        | grep -vE 'ObLightyCond|ObThreadCond::wait|ObSimpleThreadPoolBase|ObAsyncTaskQueue::pop|thread_cond_wait|SimpleCond::wait|Thread::__th_start|ObReentrantThread::blocking_run' \
+        | sort | uniq -c | sort -rn | head -30
       ;;
     *)
       log "  [profile] 本轮没有采样数据"
@@ -338,6 +399,8 @@ write_report() {
     echo "build_ik_content_sec:   ${METRICS[build_ik_content_sec]:-N/A}"
     echo "build_beng_en_sec:      ${METRICS[build_beng_en_sec]:-N/A}"
     echo "build_total_sec:        ${METRICS[build_total_sec]:-N/A}"
+    echo "build_cpu_sec:          ik_all=${METRICS[build_ik_all_cpu_sec]:-N/A} content=${METRICS[build_ik_content_cpu_sec]:-N/A} beng=${METRICS[build_beng_en_cpu_sec]:-N/A}"
+    echo "build_cores:            ik_all=${METRICS[build_ik_all_cores]:-N/A} content=${METRICS[build_ik_content_cores]:-N/A} beng=${METRICS[build_beng_en_cores]:-N/A}"
     echo "----------------------------------------"
     echo "tokenize_ik_avg_ms:     ${METRICS[tokenize_ik_avg_ms]:-N/A}"
     echo "tokenize_ik_median_ms:  ${METRICS[tokenize_ik_median_ms]:-N/A}"
@@ -385,6 +448,12 @@ log "rows=${ROWS} batch=${BATCH} rounds=${ROUNDS} query_rounds=${QUERY_ROUNDS} s
 
 log "[0/5] SQL baseline ..."
 run_repeated_sql_bench "select1" "${ROUNDS}" "SELECT 1;"
+
+# 采样模式的检查放在最前面：缺 perf 时让人 10 秒后就知道，
+# 而不是灌完 20000 篇、进了 build 才发现。
+if [[ "${PROFILE_BUILD}" == "1" ]]; then
+  profile_precheck
+fi
 
 if [[ "${SKIP_LOAD}" != "1" ]]; then
   log "[1/5] setup raw schema ..."
@@ -501,9 +570,12 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
   log "  三个全文索引均已就绪"
 
   # 采样模式下，build 一结束就把报告打出来并退出：此时机器状态最干净，
-  # 也让「编译 → 采样」一轮只占几分钟机时。
+  # 也让「编译 → 采样」一轮只占几分钟机时。报告照样落盘，供外层脚本取用。
   if [[ "${PROFILE_BUILD}" == "1" ]]; then
     profile_report
+    if [[ -n "${OUTPUT}" ]]; then
+      write_report >> "${OUTPUT}"
+    fi
     log "PROFILE_BUILD=1：只做 build 采样，跳过分词与查询压测"
     exit 0
   fi

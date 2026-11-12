@@ -555,10 +555,13 @@ stage_prof() {
     LABEL="${label}" OUTPUT="${out}" PROFILE_BUILD=1 \
     bash tools/benchmark/fts_large_bench.sh ) || die "采样失败，看 ${out}"
 
-  log "构建耗时（采样轮，perf 在窗口外启停，数字仍可参考）"
-  grep -E "^build_.*_sec:" "${out}" | sed 's/^/  /'
-  # 热点报告就在终端里，落盘一份方便贴出来。
-  info "✓ 完整日志：${out}"
+  if [ -f "${out}" ]; then
+    log "构建耗时（采样轮；perf 在计时窗口外启停，数字仍可参考）"
+    grep -E "^build_.*_sec:" "${out}" | sed 's/^/  /'
+    info "✓ 完整报告：${out}"
+  else
+    info "! 报告没落盘，热点只在上面终端输出里"
+  fi
 }
 
 stage_test() {
