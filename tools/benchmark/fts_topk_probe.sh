@@ -111,4 +111,61 @@ else
   echo "  日志目录不存在: ${LOG_DIR}"
 fi
 
+# --------------------------------------------------------------- 6. 优化器是否真的下推了 LIMIT
+# 这是本探针要回答的核心问题。query_limit 只取 20 行，却比全扫 8001 行的
+# query_cn 还慢一倍。如果优化器把 LIMIT 留在子查询里没有变成 topk，
+# 那就退化成「全扫 + 丢掉除前 20 行外的所有行」，这正是它慢的原因。
+#
+# 判定方法：看执行计划里有没有 LIMIT 节点，以及 table scan 上有没有
+# topk / block max 的标记。
+log "6. LIMIT 是否被下推成 topk（看执行计划里的 LIMIT 节点）"
+
+plan_of() {
+  ${MYSQL_VERBOSE} -e "EXPLAIN $1" 2>&1 | sed 's/^/    /'
+}
+
+echo "  6a. query_limit 的计划（子查询内 LIMIT 20）"
+plan_of "SELECT COUNT(*) FROM (SELECT id FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('${MATCH_WORDS}') LIMIT 20) t;"
+
+echo "  6b. query_cn 的计划（同样 MATCH，无 LIMIT）"
+plan_of "SELECT COUNT(*) FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('${MATCH_WORDS}');"
+
+# 计划里出现 "topk" 或 "block max" 说明走了 pushdown topk 路径；
+# 只出现普通 LIMIT 节点说明 LIMIT 是在结果集上做的，没有下推。
+echo "  6c. 计划中的关键标记"
+plan_a=$(${MYSQL_VERBOSE} -e "EXPLAIN SELECT COUNT(*) FROM (SELECT id FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('${MATCH_WORDS}') LIMIT 20) t;" 2>&1)
+for kw in "topk" "TOPK" "block max" "BLOCK MAX" "LIMIT" "limit"; do
+  n=$(printf '%s' "${plan_a}" | grep -c "${kw}")
+  printf '    %-12s 出现 %s 次\n' "${kw}" "${n}"
+done
+
+# --------------------------------------------------------------- 7. 服务端是否真的少扫了行
+# 这是 LIMIT 生效的最终证据：LIMIT 20 的查询，累计扫描行数应当远小于
+# 无 LIMIT 的查询。直接从日志里抓最近一次两类查询的 rowscanned。
+log "7. 服务端扫描行数对比（LIMIT 是否真的提前停了）"
+if [ -d "${LOG_DIR}" ]; then
+  echo "  7a. 最近 40 条 rowscanned"
+  grep -rhoE "rowscanned=[0-9]+" "${LOG_DIR}" 2>/dev/null | tail -40 | sed 's/^/    /'
+  echo "  7b. 服务端对 FTS 查询的摘要"
+  grep -rhE "fts|retrieval|topk|block_max" "${LOG_DIR}" 2>/dev/null \
+    | tail -15 | sed 's/.*] /    /' | cut -c1-200
+else
+  echo "  日志目录不存在: ${LOG_DIR}"
+fi
+
 log "完成"
+
+# --------------------------------------------------------------- 8. 缓存命中与否
+# query_cn 在平台上提升 53.5%，query_limit 只有 0.1%。两者都走 DaaT，都应该
+# 命中倒排链缓存（本机日志里能看到 "fts inverted chain hit"）。如果 query_limit
+# 的缓存没命中，说明它的执行路径确实不同 —— 这就是那 4~6 分的缺口所在。
+log "8. 倒排链缓存命中情况（对比 query_cn 与 query_limit 的 token）"
+if [ -d "${LOG_DIR}" ]; then
+  echo "  8a. 所有缓存命中记录"
+  grep -rh "fts inverted chain" "${LOG_DIR}" 2>/dev/null | tail -30 | sed 's/.*] /    /'
+  echo "  8b. 命中次数统计"
+  printf '    cached : %s\n' "$(grep -rh 'fts inverted chain cached' "${LOG_DIR}" 2>/dev/null | wc -l)"
+  printf '    hit    : %s\n' "$(grep -rh 'fts inverted chain hit' "${LOG_DIR}" 2>/dev/null | wc -l)"
+else
+  echo "  日志目录不存在: ${LOG_DIR}"
+fi
