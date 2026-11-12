@@ -293,6 +293,51 @@ grep -E "token（|token LIMIT|token 无 LIMIT|MATCH\(" /tmp/fts_topk_probe_out.t
 echo "  10e. 倒排链缓存"
 grep -E "cached :|hit    :" /tmp/fts_topk_probe_out.txt 2>/dev/null | sed 's/^/    /'
 
+# --------------------------------------------------------------- 11. 排序是不是那 4 倍的来源
+# 已经测到的事实：
+#   单 token 无 LIMIT    6.169 ms   (hits=6667)
+#   单 token LIMIT 8001  25.757 ms  (hits=6667)  <- 同一个结果集，慢 4 倍
+#
+# 同一个结果集，慢了 4 倍，所以多出来的不是扫描，是别的开销。执行计划里
+# LIMIT 形式的查询带着 "sort_keys([MATCH(...)], DESC)"，而 MATCH 的 relevance
+# 是要算 BM25 的。
+#
+# 这一段直接对比三种形态：
+#   A) WHERE MATCH，不排序不取行      -> 只要布尔结果
+#   B) WHERE MATCH，LIMIT（无 ORDER BY）
+#   C) WHERE MATCH + 显式 ORDER BY relevance
+# 如果 B 明显慢于 A 而和 C 一样慢，那开销就在 relevance 计算与排序上。
+log "11. 排序 / relevance 是不是额外开销的来源"
+
+sorted_sql="SELECT COUNT(*) FROM (SELECT id FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('${MATCH_WORDS}') LIMIT 20) t;"
+plain_sql="SELECT COUNT(*) FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('${MATCH_WORDS}');"
+
+echo "  11a. 不排序、不取行（只要布尔结果）"
+timed_hits "${plain_sql}" "WHERE MATCH 计数"
+
+echo "  11b. LIMIT 20（计划里带 MATCH 排序键）"
+timed_hits "${sorted_sql}" "WHERE MATCH + LIMIT 20"
+
+echo "  11c. 显式按 relevance 排序"
+timed_hits "SELECT COUNT(*) FROM (SELECT id FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('${MATCH_WORDS}') ORDER BY MATCH(content) AGAINST('${MATCH_WORDS}') DESC LIMIT 20) t;" \
+           "WHERE MATCH + ORDER BY relevance"
+
+echo "  11d. 去掉 relevance 的写法（只取行号，不碰 MATCH 表达式）"
+timed_hits "SELECT COUNT(*) FROM (SELECT id FROM ${DB}.${TABLE} WHERE MATCH(content) AGAINST('${MATCH_WORDS}') LIMIT 20) t;" \
+           "LIMIT 20 取 id（对照）"
+
+echo "  11e. 计划里的 relevance 标记"
+for q in "${plain_sql}" "${sorted_sql}"; do
+  plan=$(mysql_exec "EXPLAIN ${q}" 2>&1 | tr '\n' ' ')
+  if printf '%s' "${plan}" | grep -qi "calc_relevance=true"; then
+    printf '    calc_relevance=true   <- %s\n' "${q:0:60}"
+  elif printf '%s' "${plan}" | grep -qi "calc_relevance"; then
+    printf '    calc_relevance=false  <- %s\n' "${q:0:60}"
+  else
+    printf '    计划里没有 calc_relevance 标记  <- %s\n' "${q:0:60}"
+  fi
+done
+
 log "完成（全部）"
 
 # --------------------------------------------------------------- 8. 缓存命中与否
