@@ -77,11 +77,12 @@ echo "tokenize 自检: ${check_tokenize}"
 
 check_benchmark="$(sql "SELECT BENCHMARK(10, 1+1);")"
 if [ -z "${check_benchmark}" ]; then
-  echo "!! BENCHMARK() 不可用，本探针依赖它做进程内循环" >&2
-  echo "   替代方案：手工把 tokenize 包进存储过程循环，或告诉我，我换一种测法" >&2
-  exit 1
+  HAVE_BENCHMARK=0
+  echo "BENCHMARK 自检: 不可用，跳过单篇法，只用批量法（批量法不依赖它）"
+else
+  HAVE_BENCHMARK=1
+  echo "BENCHMARK 自检: 可用"
 fi
-echo "BENCHMARK 自检: 可用"
 
 doc_count="$(sql "SELECT COUNT(*) FROM ${DB}.docs;")"
 if [ -z "${doc_count}" ] || [ "${doc_count}" -lt 100 ] 2>/dev/null; then
@@ -108,16 +109,28 @@ echo
 # 1) 空转基准：BENCHMARK 循环本身的成本
 BASE_MS=$(time_ms "SELECT BENCHMARK(${ROUNDS}, 1+1);")
 
-# 2) 同一篇文档 tokenize N 次
-IK_MS=$(time_ms "SELECT BENCHMARK(${ROUNDS}, tokenize(content, 'ik')) FROM ${DB}.docs WHERE id = ${DOC_ID};")
+# 2) 同一篇文档 tokenize N 次（需要 BENCHMARK）
+IK_MS=0
+BENG_MS=0
+if [ "${HAVE_BENCHMARK}" = "1" ]; then
+  IK_MS=$(time_ms "SELECT BENCHMARK(${ROUNDS}, tokenize(content, 'ik')) FROM ${DB}.docs WHERE id = ${DOC_ID};")
+  BENG_MS=$(time_ms "SELECT BENCHMARK(${ROUNDS}, tokenize(content_en, 'beng')) FROM ${DB}.docs WHERE id = ${DOC_ID};")
+fi
 
-# 3) 英文分词作对照
-BENG_MS=$(time_ms "SELECT BENCHMARK(${ROUNDS}, tokenize(content_en, 'beng')) FROM ${DB}.docs WHERE id = ${DOC_ID};")
+# 4) 批量法：整表分词一遍，摊到每篇。
+#    这比 BENCHMARK 更接近建索引时的真实开销 —— 它把每篇文档的分词都算上，
+#    而且不依赖 BENCHMARK 是否存在。
+BULK_BASE_MS=$(time_ms "SELECT SUM(CHAR_LENGTH(content)) FROM ${DB}.docs;")
+BULK_IK_MS=$(time_ms "SELECT SUM(CHAR_LENGTH(tokenize(content, 'ik'))) FROM ${DB}.docs;")
+BULK_BENG_MS=$(time_ms "SELECT SUM(CHAR_LENGTH(tokenize(content_en, 'beng'))) FROM ${DB}.docs;")
 
-python3 - "$ROUNDS" "$BASE_MS" "$IK_MS" "$BENG_MS" "$DOC_LEN" <<'PYEOF'
+python3 - "$ROUNDS" "$BASE_MS" "$IK_MS" "$BENG_MS" "$DOC_LEN" \
+         "$BULK_BASE_MS" "$BULK_IK_MS" "$BULK_BENG_MS" "${doc_count}" <<'PYEOF'
 import sys
-rounds, base_ms, ik_ms, beng_ms, doc_len = (
-    int(sys.argv[1]), float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]), int(sys.argv[5]))
+(rounds, base_ms, ik_ms, beng_ms, doc_len,
+ bulk_base_ms, bulk_ik_ms, bulk_beng_ms, doc_count) = (
+    int(sys.argv[1]), float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]), int(sys.argv[5]),
+    float(sys.argv[6]), float(sys.argv[7]), float(sys.argv[8]), int(sys.argv[9]))
 
 def per_call_ms(total_ms):
     net = max(total_ms - base_ms, 0.0)
@@ -127,20 +140,32 @@ ik = per_call_ms(ik_ms)
 beng = per_call_ms(beng_ms)
 
 print(f"空转基准（{rounds} 次 BENCHMARK 循环）: {base_ms:.0f} ms")
-print(f"tokenize(ik)   总 {ik_ms:.0f} ms  净每次 {ik*1000:.1f} µs")
-print(f"tokenize(beng) 总 {beng_ms:.0f} ms  净每次 {beng*1000:.1f} µs")
+print(f"[单篇法] tokenize(ik)   净每次 {ik*1000:.1f} µs   (样本文档 {doc_len} 字符)")
+print(f"[单篇法] tokenize(beng) 净每次 {beng*1000:.1f} µs")
 print()
-# build_ik_content 每篇约 161µs，覆盖两张辅助表 => 每表 80µs
+
+# 批量法：整表分词减去整表读列的基线，再摊到每篇
+bulk_net = max(bulk_ik_ms - bulk_base_ms, 0.0)
+bulk_per_doc_us = bulk_net / doc_count * 1000 if doc_count else 0.0
+bulk_beng_net = max(bulk_beng_ms - bulk_base_ms, 0.0)
+bulk_beng_per_doc_us = bulk_beng_net / doc_count * 1000 if doc_count else 0.0
+print(f"读列基线（整表）: {bulk_base_ms:.0f} ms")
+print(f"[批量法] tokenize(ik)   每篇 {bulk_per_doc_us:.1f} µs  （{doc_count} 篇，净 {bulk_net:.0f} ms）")
+print(f"[批量法] tokenize(beng) 每篇 {bulk_beng_per_doc_us:.1f} µs")
+print()
+
 per_table_us = 161.0 / 2
 print(f"参考：build_ik_content 每篇约 161µs，两张辅助表 => 每表 {per_table_us:.0f}µs")
-if ik > 0:
-    share = ik * 1000 / per_table_us * 100
-    print(f"分词占每表成本: {ik*1000:.1f} / {per_table_us:.0f} = {share:.0f}%")
-    print()
-    if share >= 55:
-        print("=> 分词是大头，优先优化分词路径")
-    elif share <= 30:
-        print("=> 写入是大头，优先做批量提交")
-    else:
-        print("=> 分词与写入各占一半，两边都要动")
+for label, value in (("单篇法", ik * 1000), ("批量法", bulk_per_doc_us)):
+    if value > 0:
+        share = value / per_table_us * 100
+        print(f"  {label} 分词占比: {value:.1f} / {per_table_us:.0f} = {share:.0f}%")
+print()
+share = (bulk_per_doc_us or ik * 1000) / per_table_us * 100
+if share >= 55:
+    print("=> 分词是大头，优先优化分词路径")
+elif share <= 30:
+    print("=> 写入是大头，优先做批量提交")
+else:
+    print("=> 分词与写入各占一半，两边都要动")
 PYEOF
