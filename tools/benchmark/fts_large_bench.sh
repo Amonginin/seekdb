@@ -207,11 +207,47 @@ run_query_bench() {
 # observer 进程累计 CPU 时间（单位：时钟滴答）。utime+stime 对全部线程求和。
 # 字段偏移：/proc/<pid>/task/<tid>/stat 的第 2 个字段 comm 可能含空格和括号，
 # 所以先删掉到最后一个 ') ' 为止的前缀，剩下的字段就从 state 开始，utime 变成第 12 个。
+# 全部线程的 CPU 滴答。awk 一次吃掉所有文件：几百个线程时逐文件 fork awk
+# 会把采样开销做到秒级。
 proc_cpu_ticks() {
   local pid="$1"
   local files=(/proc/"${pid}"/task/*/stat)
-  # 一次 awk 吃掉全部线程：几百个线程时，逐文件 fork awk 会把采样开销做到秒级。
   awk '{ sub(/^.*\) /, ""); s += $12 + $13 } END { printf "%.0f", s + 0 }' "${files[@]}" 2>/dev/null
+}
+
+# 只统计 DDL_* 线程（建索引 worker）的 CPU 滴答。
+#
+# 为什么单独算：proc_cpu_ticks 统计的是整个 observer 进程，包含后台合并、日志、
+# 心跳等与建索引无关的线程。build 只用 9.6s 墙钟时进程一共烧 22.3 CPU 秒，
+# 折合 2.3 核——但其中多少是建索引自己的？如果 DDL 线程只占 6 CPU 秒，
+# 那建索引实际只用 0.6 核，说明它根本不是 CPU 瓶颈，而是在等。
+# 这个区分决定了后面该优化计算还是优化等待。
+proc_ddl_cpu_ticks() {
+  local pid="$1"
+  local total=0 tid
+  for tid in /proc/"${pid}"/task/*; do
+    [ -r "${tid}/comm" ] || continue
+    case "$(cat "${tid}/comm" 2>/dev/null)" in
+      DDL_*) ;;
+      *) continue ;;
+    esac
+    [ -r "${tid}/stat" ] || continue
+    local t
+    t="$(awk '{ sub(/^.*\) /, ""); print $12 + $13 }' "${tid}/stat" 2>/dev/null)"
+    total=$((total + ${t:-0}))
+  done
+  printf '%s' "${total}"
+}
+
+proc_ddl_thread_count() {
+  local pid="$1" n=0 tid
+  for tid in /proc/"${pid}"/task/*; do
+    [ -r "${tid}/comm" ] || continue
+    case "$(cat "${tid}/comm" 2>/dev/null)" in
+      DDL_*) n=$((n + 1)) ;;
+    esac
+  done
+  printf '%s' "${n}"
 }
 
 proc_thread_count() {
@@ -229,24 +265,33 @@ time_mysql_command() {
   local name="$1" sql="$2"
   local start_ns end_ns total_sec
   local ticks0="" ticks1="" cpu_sec="" cores="" hz
+  local dticks0="" dticks1="" ddl_cpu="" ddl_cores="" ddl_threads=""
   hz="$(getconf CLK_TCK 2>/dev/null || echo 100)"
   if [ -n "${OBSERVER_PID}" ] && [ -d "/proc/${OBSERVER_PID}" ]; then
     ticks0="$(proc_cpu_ticks "${OBSERVER_PID}")"
+    dticks0="$(proc_ddl_cpu_ticks "${OBSERVER_PID}")"
+    ddl_threads="$(proc_ddl_thread_count "${OBSERVER_PID}")"
   fi
   start_ns=$(now_ns)
   mysql_exec "${sql}" >/dev/null
   end_ns=$(now_ns)
   if [ -n "${ticks0}" ] && [ -d "/proc/${OBSERVER_PID}" ]; then
     ticks1="$(proc_cpu_ticks "${OBSERVER_PID}")"
+    dticks1="$(proc_ddl_cpu_ticks "${OBSERVER_PID}")"
     cpu_sec="$(awk -v a="${ticks0}" -v b="${ticks1}" -v hz="${hz}" 'BEGIN { printf "%.3f", (b - a) / hz }')"
+    ddl_cpu="$(awk -v a="${dticks0}" -v b="${dticks1}" -v hz="${hz}" 'BEGIN { printf "%.3f", (b - a) / hz }')"
   fi
   total_sec=$(elapsed_sec "${start_ns}" "${end_ns}")
   METRICS["${name}_sec"]="${total_sec}"
   if [ -n "${cpu_sec}" ]; then
     cores="$(awk -v c="${cpu_sec}" -v t="${total_sec}" 'BEGIN { if (t > 0) printf "%.2f", c / t; else printf "0" }')"
+    ddl_cores="$(awk -v c="${ddl_cpu}" -v t="${total_sec}" 'BEGIN { if (t > 0) printf "%.2f", c / t; else printf "0" }')"
     METRICS["${name}_cpu_sec"]="${cpu_sec}"
     METRICS["${name}_cores"]="${cores}"
-    log "  ${name}: ${total_sec}s  cpu=${cpu_sec}s  cores=${cores}"
+    METRICS["${name}_ddl_cpu_sec"]="${ddl_cpu}"
+    METRICS["${name}_ddl_cores"]="${ddl_cores}"
+    METRICS["${name}_ddl_threads"]="${ddl_threads:-0}"
+    log "  ${name}: ${total_sec}s  cpu=${cpu_sec}s cores=${cores} | ddl_cpu=${ddl_cpu}s ddl_cores=${ddl_cores} ddl_threads=${ddl_threads:-0}"
   else
     log "  ${name}: ${total_sec}s"
   fi
@@ -482,6 +527,11 @@ write_report() {
     echo "build_total_sec:        ${METRICS[build_total_sec]:-N/A}"
     echo "build_cpu_sec:          ik_all=${METRICS[build_ik_all_cpu_sec]:-N/A} content=${METRICS[build_ik_content_cpu_sec]:-N/A} beng=${METRICS[build_beng_en_cpu_sec]:-N/A}"
     echo "build_cores:            ik_all=${METRICS[build_ik_all_cores]:-N/A} content=${METRICS[build_ik_content_cores]:-N/A} beng=${METRICS[build_beng_en_cores]:-N/A}"
+    # build_ddl_cores 只算 DDL_* 线程，是建索引自己的并行度。
+    # build_cores 是整个 observer 进程的（含后台合并/日志），两者不可混用。
+    echo "build_ddl_cpu_sec:      ik_all=${METRICS[build_ik_all_ddl_cpu_sec]:-N/A} content=${METRICS[build_ik_content_ddl_cpu_sec]:-N/A} beng=${METRICS[build_beng_en_ddl_cpu_sec]:-N/A}"
+    echo "build_ddl_cores:        ik_all=${METRICS[build_ik_all_ddl_cores]:-N/A} content=${METRICS[build_ik_content_ddl_cores]:-N/A} beng=${METRICS[build_beng_en_ddl_cores]:-N/A}"
+    echo "build_ddl_threads:      ik_all=${METRICS[build_ik_all_ddl_threads]:-N/A} content=${METRICS[build_ik_content_ddl_threads]:-N/A} beng=${METRICS[build_beng_en_ddl_threads]:-N/A}"
     # 墙钟受调度和后台合并影响，同一二进制两轮能有 3% 以上的差；CPU 秒只反映真实
     # 工作量，是判断「每行开销」类改动的可靠指标，所以单独给一个合计数。
     echo "build_cpu_total_sec:    ${METRICS[build_cpu_total_sec]:-$(awk -v a="${METRICS[build_ik_all_cpu_sec]:-0}" \
