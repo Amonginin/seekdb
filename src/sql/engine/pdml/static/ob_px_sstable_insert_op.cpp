@@ -50,12 +50,14 @@ void report_fts_row_timing()
   if (0 == tl_fts_sample_cnt) {
     return;
   }
+  // 单位是纳秒，不是微秒：单行 scan 只有几百纳秒，用 us 做整数除法会被截成 0，
+  // 第一版就是这样把三段全打成了 0。
   LOG_INFO("fts ddl row phase timing",
            "samples", tl_fts_sample_cnt,
-           "scan_us_per_row", tl_fts_scan_us / tl_fts_sample_cnt,
-           "misc_us_per_row", tl_fts_misc_us / tl_fts_sample_cnt,
-           "eval_us_per_row", tl_fts_eval_us / tl_fts_sample_cnt,
-           "write_us_per_row", tl_fts_write_us / tl_fts_sample_cnt);
+           "scan_ns_per_row", tl_fts_scan_us * 1000 / tl_fts_sample_cnt,
+           "misc_ns_per_row", tl_fts_misc_us * 1000 / tl_fts_sample_cnt,
+           "eval_ns_per_row", tl_fts_eval_us * 1000 / tl_fts_sample_cnt,
+           "write_ns_per_row", tl_fts_write_us * 1000 / tl_fts_sample_cnt);
   tl_fts_scan_us = 0;
   tl_fts_misc_us = 0;
   tl_fts_eval_us = 0;

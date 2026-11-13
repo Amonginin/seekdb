@@ -426,10 +426,10 @@ write_report() {
     echo "build_cores:            ik_all=${METRICS[build_ik_all_cores]:-N/A} content=${METRICS[build_ik_content_cores]:-N/A} beng=${METRICS[build_beng_en_cores]:-N/A}"
     # 墙钟受调度和后台合并影响，同一二进制两轮能有 3% 以上的差；CPU 秒只反映真实
     # 工作量，是判断「每行开销」类改动的可靠指标，所以单独给一个合计数。
-    echo "build_cpu_total_sec:    $(awk -v a="${METRICS[build_ik_all_cpu_sec]:-0}" \
+    echo "build_cpu_total_sec:    ${METRICS[build_cpu_total_sec]:-$(awk -v a="${METRICS[build_ik_all_cpu_sec]:-0}" \
                                           -v b="${METRICS[build_ik_content_cpu_sec]:-0}" \
                                           -v c="${METRICS[build_beng_en_cpu_sec]:-0}" \
-                                          'BEGIN { printf "%.3f", a + b + c }')"
+                                          'BEGIN { printf "%.3f", a + b + c }')}"
     echo "----------------------------------------"
     echo "tokenize_ik_avg_ms:     ${METRICS[tokenize_ik_avg_ms]:-N/A}"
     echo "tokenize_ik_median_ms:  ${METRICS[tokenize_ik_median_ms]:-N/A}"
@@ -572,7 +572,23 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
         printf -v "${best_var}" '%s' "${cur}"
       fi
     done
-    log "  build round ${r}/${repeats}: total=${total}s  (ik_all=${METRICS[build_ik_all_sec]} content=${METRICS[build_ik_content_sec]} beng=${METRICS[build_beng_en_sec]})"
+    # build_cpu_sec 每次 ALTER 都会被覆盖写，所以到最后一轮只剩最后一轮的值，
+    # 和 wall 的 min-of-N 口径不一致。这里按「轮」把三项 CPU 秒加起来取最小，
+    # 让 CPU 与 wall 是同一轮的数（CPU 比 wall 稳，同二进制两轮 wall 差 3.2%、
+    # CPU 只差 0.3%，判断每行开销类改动只能用它）。
+    round_cpu=""
+    for cname in build_ik_all build_ik_content build_beng_en; do
+      cval="${METRICS[${cname}_cpu_sec]:-}"
+      if [[ -n "${cval}" ]]; then
+        round_cpu=$(awk -v a="${round_cpu:-0}" -v b="${cval}" 'BEGIN { printf "%.3f", a + b }')
+      fi
+    done
+    if [[ -n "${round_cpu}" ]]; then
+      if [[ -z "${build_cpu_total_best:-}" ]] || awk "BEGIN {exit !(${round_cpu} < ${build_cpu_total_best})}"; then
+        build_cpu_total_best="${round_cpu}"
+      fi
+    fi
+    log "  build round ${r}/${repeats}: total=${total}s cpu=${round_cpu:-N/A}s  (ik_all=${METRICS[build_ik_all_sec]} content=${METRICS[build_ik_content_sec]} beng=${METRICS[build_beng_en_sec]})"
   done
   if [[ "${repeats}" -gt 1 ]]; then
     METRICS[build_ik_all_sec]="${build_ik_all_best}"
@@ -581,6 +597,9 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
     log "  best of ${repeats}: ik_all=${build_ik_all_best} content=${build_ik_content_best} beng=${build_beng_en_best}"
   fi
   METRICS[build_total_sec]="${build_total_sec}"
+  if [[ -n "${build_cpu_total_best:-}" ]]; then
+    METRICS[build_cpu_total_sec]="${build_cpu_total_best}"
+  fi
 
   # Verify the indexes exist before scoring anything. A dropped or failed
   # index would make every later query report "Can't find FULLTEXT index" and
