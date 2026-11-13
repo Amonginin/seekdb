@@ -17,7 +17,7 @@ set -uo pipefail
 
 SRC_DIR="${SRC_DIR:-/tmp/seekdb}"
 LOG_DIR="${LOG_DIR:-/tmp/recover}"
-DOPS="${DOPS:-2 3 4 6 8}"
+DOPS="${DOPS:-1 2 3 4 6 8}"
 BUILD_REPEATS="${BUILD_REPEATS:-2}"
 
 mkdir -p "${LOG_DIR}"
@@ -53,9 +53,14 @@ for dop in ${DOPS}; do
 
   total="$(grep -m1 '^build_total_sec:' "${report}" | awk '{print $2}')"
   cores="$(grep -m1 '^build_cores:' "${report}" | sed 's/^build_cores:[[:space:]]*//')"
+  cpu="$(grep -m1 '^build_cpu_sec:' "${report}" | sed 's/^build_cpu_sec:[[:space:]]*//')"
   load="$(grep -m1 '^raw_load_sec:' "${report}" | awk '{print $2}')"
-  printf '  DOP=%s  build_total=%ss  raw_load=%ss  cores=%s\n' \
-         "${dop}" "${total:-N/A}" "${load:-N/A}" "${cores:-N/A}" | tee -a "${summary}"
+  # 三个 build 子项的墙钟极差：平台上的「随机单相卡顿」会体现在这里。
+  spread="$(grep -E '^build_(ik_all|ik_content|beng_en)_sec:' "${report}" \
+            | awk '{print $2}' | sort -n | awk 'NR==1{min=$1} {max=$1} END{if(min>0) printf "%.2f", max/min; else print "N/A"}')"
+  printf 'DOP=%s build_total=%ss cpu=%s cores=%s spread=%s raw_load=%ss\n' \
+         "${dop}" "${total:-N/A}" "${cpu:-N/A}" "${cores:-N/A}" \
+         "${spread:-N/A}" "${load:-N/A}" | tee -a "${summary}"
 
   # 哨兵：灌数被后台合并干扰的轮次不能用来比 DOP。
   awk -v v="${load:-0}" 'BEGIN {
@@ -63,6 +68,6 @@ for dop in ${DOPS}; do
 done
 
 echo | tee -a "${summary}"
-echo "汇总（取 build_total 最小者）：" | tee -a "${summary}"
-grep '^  DOP=' "${summary}" | sort -t= -k3 -n | head -10 | tee -a "${summary}"
+echo "汇总（按 build_total 升序；spread>2 说明这一轮撞上了单相卡顿）" | tee -a "${summary}"
+grep '^DOP=' "${summary}" | sort -t= -k3 -n | head -10 | tee -a "${summary}"
 echo "完整结果：${summary}"

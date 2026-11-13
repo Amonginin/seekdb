@@ -735,6 +735,13 @@ protected:
   bool in_rescan_;
   ObDomainIndexCache domain_index_;
   ObFTIndexRowCache fts_index_;
+  // Resolving the four FTS generated-column exprs by linearly scanning
+  // MY_SPEC.output_ used to happen once per posting row (millions of rows per
+  // build). The spec is immutable for this operator's lifetime, so cache the
+  // pointers. OB_FTS_NO_EXPR_CACHE=1 restores the old path for A/B testing.
+  ObExpr *fts_gen_exprs_[share::ObFtsIndexBuilderUtil::OB_FTS_INDEX_OR_DOC_WORD_TABLE_COL_CNT];
+  bool fts_gen_exprs_inited_;
+  bool fts_gen_expr_cache_disabled_;
 
   // output_ is used to output data, TSC operator directly invokes output_::get_next_row(s),
   // it points to fold_iter_ in group rescan and iter_tree_ in normal scan.

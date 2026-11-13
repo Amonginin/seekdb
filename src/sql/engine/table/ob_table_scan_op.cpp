@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
+#include <stdlib.h>
 #include "data_plane/transaction/ob_transaction_version.h"
 
 
@@ -679,6 +680,9 @@ ObTableScanOp::ObTableScanOp(ObExecContext &exec_ctx, const ObOpSpec &spec, ObOp
     in_rescan_(false),
     domain_index_(),
     fts_index_(),
+    fts_gen_exprs_{},
+    fts_gen_exprs_inited_(false),
+    fts_gen_expr_cache_disabled_(nullptr != ::getenv("OB_FTS_NO_EXPR_CACHE")),
     output_   (nullptr),
     fold_iter_(nullptr),
     iter_tree_(nullptr),
@@ -3688,14 +3692,34 @@ int ObTableScanOp::fetch_next_fts_index_rows()
 int ObTableScanOp::fill_generated_fts_cols(blocksstable::ObDatumRow *row)
 {
   int ret = OB_SUCCESS;
+  const int64_t col_cnt = share::ObFtsIndexBuilderUtil::OB_FTS_INDEX_OR_DOC_WORD_TABLE_COL_CNT;
   const ObObjDatumMapType *types = MY_SPEC.is_fts_index_aux_ ? ObFTIndexRowCache::FTS_INDEX_TYPES : ObFTIndexRowCache::FTS_DOC_WORD_TYPES;
   const ObExprOperatorType *expr_types = MY_SPEC.is_fts_index_aux_ ? ObFTIndexRowCache::FTS_INDEX_EXPR_TYPE : ObFTIndexRowCache::FTS_DOC_WORD_EXPR_TYPE;
   if (OB_ISNULL(row)) {
     ret = OB_INVALID_ARGUMENT;
-  } else {
-    for (int64_t i = 0; OB_SUCC(ret) && i < share::ObFtsIndexBuilderUtil::OB_FTS_INDEX_OR_DOC_WORD_TABLE_COL_CNT; ++i) {
+  } else if (!fts_gen_expr_cache_disabled_ && OB_UNLIKELY(!fts_gen_exprs_inited_)) {
+    // MY_SPEC.output_ is fixed for the lifetime of this operator and so is
+    // MY_SPEC.is_fts_index_aux_, so the four exprs can be resolved once.
+    // The old path resolved them for every posting row by scanning output_.
+    for (int64_t i = 0; OB_SUCC(ret) && i < col_cnt; ++i) {
+      if (OB_FAIL(get_output_fts_col_expr_by_type(expr_types[i], fts_gen_exprs_[i]))) {
+      } else if (OB_ISNULL(fts_gen_exprs_[i])) {
+        ret = OB_ERR_UNEXPECTED;
+      }
+    }
+    if (OB_SUCC(ret)) {
+      fts_gen_exprs_inited_ = true;
+    }
+  }
+  if (OB_SUCC(ret)) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < col_cnt; ++i) {
       ObExpr *expr = nullptr;
-      if (OB_FAIL(get_output_fts_col_expr_by_type(expr_types[i], expr))) {
+      if (fts_gen_expr_cache_disabled_ || !fts_gen_exprs_inited_) {
+        ret = get_output_fts_col_expr_by_type(expr_types[i], expr);
+      } else {
+        expr = fts_gen_exprs_[i];
+      }
+      if (OB_FAIL(ret)) {
       } else {
         ObDatum &datum = expr->locate_datum_for_write(eval_ctx_);
         ObEvalInfo &eval_info = expr->get_eval_info(eval_ctx_);
