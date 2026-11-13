@@ -264,7 +264,28 @@ PROFILE_KIND=""
 PROFILE_DATA=""
 PROFILE_JOB=""
 PROFILE_PID=""
+PERF_BIN=""
 PROFILE_GDB="${PROFILE_GDB:-0}"
+PROFILE_EVENT="${PROFILE_EVENT:-cpu-clock}"
+
+# /usr/bin/perf 是个 wrapper，会按 uname -r 去 /usr/lib/linux-tools/<ver>/ 找二进制。
+# 魔搭实例跑的是自定义内核 5.10.134-...lifsea8，Ubuntu 仓库里没有对应包，
+# wrapper 直接报 "perf not found for kernel"。但 5.15 的那个二进制对
+# cpu-clock 这类软件事件通常照样能跑，所以别只看 command -v，要真采一次。
+resolve_perf_bin() {
+  local cand data
+  data="${TMP_DIR}/perf_selftest.data"
+  for cand in "$(command -v perf 2>/dev/null)" /usr/lib/linux-tools/*/perf; do
+    [ -n "${cand}" ] && [ -x "${cand}" ] || continue
+    rm -f "${data}"
+    if "${cand}" record -e "${PROFILE_EVENT}" -F 99 -o "${data}" -- sleep 0.3 >/dev/null 2>&1 \
+       && [ -s "${data}" ]; then
+      PERF_BIN="${cand}"
+      return 0
+    fi
+  done
+  return 1
+}
 
 profile_precheck() {
   PROFILE_PID="$(pgrep -f 'seekdb --base-dir' | head -1)"
@@ -272,8 +293,9 @@ profile_precheck() {
     log "ERROR: PROFILE_BUILD=1 但找不到 observer 进程（seekdb --base-dir ...）"
     exit 1
   fi
-  if command -v perf >/dev/null 2>&1; then
+  if resolve_perf_bin; then
     PROFILE_KIND="perf"
+    log "  [profile] 可用 perf：${PERF_BIN}（事件 ${PROFILE_EVENT}）"
     return 0
   fi
   if [[ "${PROFILE_GDB}" == "1" ]] && command -v gdb >/dev/null 2>&1; then
@@ -281,11 +303,12 @@ profile_precheck() {
     log "  [profile] 警告：gdb 采样会把 build 拖慢两个数量级，这一轮的耗时数字不可用（只取热点）"
     return 0
   fi
-  log "ERROR: 没有 perf，无法采样。在实例上装一个："
-  log "    apt-get update -qq && apt-get install -y linux-tools-common linux-tools-generic"
-  log "    # 若提示 perf 与内核不匹配：apt-get install -y linux-perf"
-  log "    perf --version && sysctl -w kernel.perf_event_paranoid=-1"
-  log "  仍不行时可退化为 gdb 粗采样（耗时数字会失真）：PROFILE_GDB=1 bash tools/comp_recover.sh prof"
+  log "ERROR: perf 装了但无法采样（内核 5.10.134 自定义 + perf_event_paranoid 只读，容器里常见）。"
+  log "  已试过：/usr/bin/perf wrapper 与 /usr/lib/linux-tools/*/perf 的 cpu-clock 自测全部失败。"
+  log "  这说明本实例不能用 perf_event_open。可选："
+  log "    1) 换一台允许 perf 的实例；"
+  log "    2) 用不含 profiler 的 build_cores / build_cpu_sec 指标继续定位（推荐）；"
+  log "    3) PROFILE_GDB=1 退化为 20 个样本的粗采样（耗时数字会失真）。"
   exit 1
 }
 
@@ -296,7 +319,7 @@ profile_start() {
     perf)
       rm -f "${PROFILE_DATA}"
       # 不带子命令时 perf 会一直采样到 SIGINT，正好覆盖三次 ALTER 的窗口。
-      perf record -F 499 -g -p "${PROFILE_PID}" -o "${PROFILE_DATA}" >/dev/null 2>&1 &
+      "${PERF_BIN}" record -e "${PROFILE_EVENT}" -F 499 -g -p "${PROFILE_PID}" -o "${PROFILE_DATA}" >/dev/null 2>&1 &
       PROFILE_JOB=$!
       sleep 1
       if ! kill -0 "${PROFILE_JOB}" 2>/dev/null; then
@@ -343,9 +366,9 @@ profile_report() {
         return 0
       fi
       log "  ---- perf 平面报告（叶子函数自身 CPU 占比）----"
-      perf report --stdio -i "${PROFILE_DATA}" --sort symbol --percent-limit 1 2>/dev/null | sed -n '1,45p'
+      "${PERF_BIN}" report --stdio -i "${PROFILE_DATA}" --sort symbol --percent-limit 1 2>/dev/null | sed -n '1,45p'
       log "  ---- perf 按 dso+symbol（区分 observer 自身 / libc / 第三方）----"
-      perf report --stdio -i "${PROFILE_DATA}" --sort dso,symbol --percent-limit 1 2>/dev/null | sed -n '1,30p'
+      "${PERF_BIN}" report --stdio -i "${PROFILE_DATA}" --sort dso,symbol --percent-limit 1 2>/dev/null | sed -n '1,30p'
       ;;
     gdb)
       if [[ ! -s "${PROFILE_DATA}" ]]; then
