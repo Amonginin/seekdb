@@ -55,12 +55,14 @@ for dop in ${DOPS}; do
   cores="$(grep -m1 '^build_cores:' "${report}" | sed 's/^build_cores:[[:space:]]*//')"
   cpu="$(grep -m1 '^build_cpu_sec:' "${report}" | sed 's/^build_cpu_sec:[[:space:]]*//')"
   load="$(grep -m1 '^raw_load_sec:' "${report}" | awk '{print $2}')"
-  # 三个 build 子项的墙钟极差：平台上的「随机单相卡顿」会体现在这里。
-  spread="$(grep -E '^build_(ik_all|ik_content|beng_en)_sec:' "${report}" \
-            | awk '{print $2}' | sort -n | awk 'NR==1{min=$1} {max=$1} END{if(min>0) printf "%.2f", max/min; else print "N/A"}')"
-  printf 'DOP=%s build_total=%ss cpu=%s cores=%s spread=%s raw_load=%ss\n' \
+  # 卡顿的判据不是三项之间的 max/min：ik_all 本来就比 beng 慢 ~2.2 倍，
+  # 那是固有形态。改看归一化后的形状（content=1），正常约 all=1.29 / beng=0.55；
+  # 某一项被拖住时对应比值会翻倍。
+  shape="$(awk '/^build_ik_all_sec:/{a=$2} /^build_ik_content_sec:/{c=$2} /^build_beng_en_sec:/{b=$2} \
+                END{if(c>0) printf "all=%.2f,beng=%.2f", a/c, b/c; else print "N/A"}' "${report}")"
+  printf 'DOP=%s build_total=%ss cpu=%s cores=%s shape=%s raw_load=%ss\n' \
          "${dop}" "${total:-N/A}" "${cpu:-N/A}" "${cores:-N/A}" \
-         "${spread:-N/A}" "${load:-N/A}" | tee -a "${summary}"
+         "${shape:-N/A}" "${load:-N/A}" | tee -a "${summary}"
 
   # 哨兵：灌数被后台合并干扰的轮次不能用来比 DOP。
   awk -v v="${load:-0}" 'BEGIN {
@@ -68,6 +70,6 @@ for dop in ${DOPS}; do
 done
 
 echo | tee -a "${summary}"
-echo "汇总（按 build_total 升序；spread>2 说明这一轮撞上了单相卡顿）" | tee -a "${summary}"
+echo "汇总（按 build_total 升序；shape 正常约 all=1.29,beng=0.55，明显偏离即单相卡顿）" | tee -a "${summary}"
 grep '^DOP=' "${summary}" | sort -t= -k3 -n | head -10 | tee -a "${summary}"
 echo "完整结果：${summary}"

@@ -16,6 +16,8 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 
+#include <stdlib.h>
+#include "lib/time/ob_time_utility.h"
 #include "sql/engine/pdml/static/ob_px_sstable_insert_op.h"
 #include "share/ob_autoincrement_service.h"
 #include "data_plane/blocksstable/ob_datum_row.h"
@@ -30,6 +32,37 @@ using namespace oceanbase::blocksstable;
 using namespace oceanbase::share;
 using namespace oceanbase::common::serialization;
 
+namespace {
+// The DSW evaluation instance runs a custom kernel with perf_event_open blocked,
+// so a profiler-free wall-clock split lives here instead. Only 1/128 of rows are
+// timed: clock_gettime then costs well under 0.1% of the build. Reporting is
+// per-thread, so each DDL worker prints its own split.
+constexpr int64_t FTS_ROW_TIMING_MASK = 127;
+constexpr int64_t FTS_ROW_TIMING_REPORT_SAMPLES = 512;
+thread_local int64_t tl_fts_scan_us = 0;   // child scan: tokenize + posting expansion
+thread_local int64_t tl_fts_misc_us = 0;   // tablet lookup / slice switch / autoinc params
+thread_local int64_t tl_fts_eval_us = 0;   // eval_current_row
+thread_local int64_t tl_fts_write_us = 0;  // append_row -> macro block writer
+thread_local int64_t tl_fts_sample_cnt = 0;
+
+void report_fts_row_timing()
+{
+  if (0 == tl_fts_sample_cnt) {
+    return;
+  }
+  LOG_INFO("fts ddl row phase timing",
+           "samples", tl_fts_sample_cnt,
+           "scan_us_per_row", tl_fts_scan_us / tl_fts_sample_cnt,
+           "misc_us_per_row", tl_fts_misc_us / tl_fts_sample_cnt,
+           "eval_us_per_row", tl_fts_eval_us / tl_fts_sample_cnt,
+           "write_us_per_row", tl_fts_write_us / tl_fts_sample_cnt);
+  tl_fts_scan_us = 0;
+  tl_fts_misc_us = 0;
+  tl_fts_eval_us = 0;
+  tl_fts_write_us = 0;
+  tl_fts_sample_cnt = 0;
+}
+}  // namespace
 
 OB_SERIALIZE_MEMBER((ObPxMultiPartSSTableInsertOpInput, ObPxMultiPartModifyOpInput));
 
@@ -471,13 +504,23 @@ int ObPxMultiPartSSTableInsertOp::write_ordered_slice_by_row()
   data_plane::ObDirectInsertAutoincParam autoinc_param;
   bool need_update_tablet_range_count = true;
 
+  // Sampling split of the four phases of each posting row. Disabled with
+  // OB_FTS_NO_ROW_TIMING=1 so the same binary can be A/B tested.
+  const bool timing_enabled = (nullptr == ::getenv("OB_FTS_NO_ROW_TIMING"));
+  int64_t row_seq = 0;
   while (OB_SUCC(ret) && !is_all_partition_finished_) {
+    const bool sampled = timing_enabled && (0 == (row_seq++ & FTS_ROW_TIMING_MASK));
+    int64_t t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0;
+    if (sampled) {
+      t0 = ObTimeUtility::current_time();
+    }
     if (OB_FAIL(get_next_row_from_child(&op_monitor_info_.otherstat_2_value_))) {
       if (OB_ITER_END != ret) {
       } else {
         is_all_partition_finished_ = true;
         ret = OB_SUCCESS;
       }
+    } else if (FALSE_IT(t1 = sampled ? ObTimeUtility::current_time() : 0)) {
     } else if (OB_UNLIKELY(need_update_tablet_range_count)
                && OB_FAIL(direct_insert_session_->prepare_ordered_input())) {
     } else if (FALSE_IT(need_update_tablet_range_count = false)) {
@@ -490,12 +533,26 @@ int ObPxMultiPartSSTableInsertOp::write_ordered_slice_by_row()
                                                                      autoinc_param.slice_index_,
                                                                      slice_writer->get_row_count(),
                                                                      autoinc_param.range_interval_))) {
+    } else if (FALSE_IT(t2 = sampled ? ObTimeUtility::current_time() : 0)) {
     } else if (OB_FAIL(eval_current_row(datums))) {
+    } else if (FALSE_IT(t3 = sampled ? ObTimeUtility::current_time() : 0)) {
     } else if (OB_FAIL(slice_writer->append_row(
                    data_plane::ObDirectInsertRowView(
                        datums.get_data(), datums.count())))) {
     }
+    if (sampled && OB_SUCC(ret) && !is_all_partition_finished_ && 0 != t1) {
+      t4 = ObTimeUtility::current_time();
+      tl_fts_scan_us += t1 - t0;
+      tl_fts_misc_us += t2 - t1;
+      tl_fts_eval_us += t3 - t2;
+      tl_fts_write_us += t4 - t3;
+      ++tl_fts_sample_cnt;
+      if (0 == (tl_fts_sample_cnt % FTS_ROW_TIMING_REPORT_SAMPLES)) {
+        report_fts_row_timing();
+      }
+    }
   }
+  report_fts_row_timing();
   if (OB_SUCC(ret) && is_all_partition_finished_ && nullptr != slice_writer) {
     if (need_idempotent_doc_id_ && OB_FAIL(sync_tablet_doc_id(slice_writer))) {
     } else if (OB_FAIL(slice_writer->close())) {
