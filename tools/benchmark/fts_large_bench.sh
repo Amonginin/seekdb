@@ -50,6 +50,7 @@ SAMPLES="${SAMPLES:-3}"
 WARMUP="${WARMUP:-30}"
 SKIP_LOAD="${SKIP_LOAD:-0}"
 PROFILE_BUILD="${PROFILE_BUILD:-0}"
+PROBE_THREADS="${PROBE_THREADS:-0}"
 OUTPUT="${OUTPUT:-}"
 
 IK_TEXT="OceanBase是一款非常稳定的数据库，全文索引的分词器热路径优化包括解析器实例复用、停用词全局单例、内存池化数据结构等技术，在大量文档索引和查询场景下可以显著降低 CPU 开销。"
@@ -249,6 +250,63 @@ time_mysql_command() {
   else
     log "  ${name}: ${total_sec}s"
   fi
+}
+
+# ---------------------------------------------------------------- thread probe
+# PROBE_THREADS=1：每次 ALTER 期间每 200ms 采一次 observer 里 DDL_* 线程的状态。
+#
+# 为什么需要它：Amdahl 反推 build 有 80.8% 是串行的（DOP 1→4 只快 1.169 倍），
+# 而 perf 在本实例被容器封死、gdb 会把 build 拖慢 80 倍。但「线程在等什么」不需要
+# 采样调用栈——/proc/<tid>/wchan 直接给出它阻塞在哪个内核函数上：
+#   futex_wait_queue_me   -> 用户态锁 / 条件变量
+#   io_schedule / wait_on_page_bit -> 磁盘 IO
+#   rwsem_down_read_failed -> 读写信号量
+# 状态位 state=D（不可中断睡眠）几乎一定是 IO，state=S 多半是锁。
+# 这两个维度合起来就能把「80% 串行」拆成 IO 等待 / 锁等待 / 真在算。
+PROBE_JOB=""
+
+probe_start() {
+  local out="$1"
+  : > "${out}"
+  rm -f "${TMP_DIR}/probe.stop"
+  (
+    while [[ ! -f "${TMP_DIR}/probe.stop" ]]; do
+      for t in /proc/"${OBSERVER_PID}"/task/*; do
+        [ -r "${t}/wchan" ] || continue
+        comm="$(cat "${t}/comm" 2>/dev/null)"
+        case "${comm}" in
+          DDL_*) ;;
+          *) continue ;;
+        esac
+        state="$(awk '{ sub(/^.*\) /, ""); print $1 }' "${t}/stat" 2>/dev/null)"
+        wchan="$(cat "${t}/wchan" 2>/dev/null)"
+        echo "${comm}|${state}|${wchan:-running}"
+      done
+      echo "----"
+      sleep 0.2
+    done
+  ) >> "${out}" &
+  PROBE_JOB=$!
+}
+
+probe_stop() {
+  if [[ -n "${PROBE_JOB}" ]]; then
+    : > "${TMP_DIR}/probe.stop"
+    wait "${PROBE_JOB}" 2>/dev/null
+    PROBE_JOB=""
+  fi
+}
+
+probe_report() {
+  local name="$1" out="$2"
+  if [[ ! -s "${out}" ]]; then
+    log "  [probe] ${name}: 没采到 DDL 线程（可能这轮没有并行建索引）"
+    return 0
+  fi
+  log "  [probe] ${name} 线程状态分布（R=运行 S=可中断睡眠 D=不可中断/IO）:"
+  awk -F'|' 'NF==3 { c[$2]++ } END { for (k in c) printf "      %6d  state=%s\n", c[k], k }' "${out}" | sort -rn | head -6
+  log "  [probe] ${name} wchan 分布（前 8）:"
+  awk -F'|' 'NF==3 { w=$3; if (w=="") w="(空)"; c[w]++ } END { for (k in c) printf "      %6d  %s\n", c[k], k }' "${out}" | sort -rn | head -8
 }
 
 # ---------------------------------------------------------------- build profiling
@@ -544,12 +602,20 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
       profile_start
     fi
     build_start_ns=$(now_ns)
+    if [[ "${PROBE_THREADS}" == "1" ]]; then probe_start "${TMP_DIR}/probe_ik_all.txt"; fi
     time_mysql_command "build_ik_all" \
       "USE fts_large_bench; ALTER TABLE docs ADD FULLTEXT INDEX fti_all_ik(title, content) WITH PARSER ik;"
+    if [[ "${PROBE_THREADS}" == "1" ]]; then probe_stop; probe_report "build_ik_all" "${TMP_DIR}/probe_ik_all.txt"; fi
+
+    if [[ "${PROBE_THREADS}" == "1" ]]; then probe_start "${TMP_DIR}/probe_content.txt"; fi
     time_mysql_command "build_ik_content" \
       "USE fts_large_bench; ALTER TABLE docs ADD FULLTEXT INDEX fti_content_ik(content) WITH PARSER ik;"
+    if [[ "${PROBE_THREADS}" == "1" ]]; then probe_stop; probe_report "build_ik_content" "${TMP_DIR}/probe_content.txt"; fi
+
+    if [[ "${PROBE_THREADS}" == "1" ]]; then probe_start "${TMP_DIR}/probe_beng.txt"; fi
     time_mysql_command "build_beng_en" \
       "USE fts_large_bench; ALTER TABLE docs ADD FULLTEXT INDEX fti_en_beng(title_en, content_en) WITH PARSER beng;"
+    if [[ "${PROBE_THREADS}" == "1" ]]; then probe_stop; probe_report "build_beng_en" "${TMP_DIR}/probe_beng.txt"; fi
     build_end_ns=$(now_ns)
     if [[ "${PROFILE_BUILD}" == "1" && "${r}" -eq 1 ]]; then
       profile_stop
