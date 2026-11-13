@@ -215,40 +215,10 @@ proc_cpu_ticks() {
   awk '{ sub(/^.*\) /, ""); s += $12 + $13 } END { printf "%.0f", s + 0 }' "${files[@]}" 2>/dev/null
 }
 
-# 只统计 DDL_* 线程（建索引 worker）的 CPU 滴答。
-#
-# 为什么单独算：proc_cpu_ticks 统计的是整个 observer 进程，包含后台合并、日志、
-# 心跳等与建索引无关的线程。build 只用 9.6s 墙钟时进程一共烧 22.3 CPU 秒，
-# 折合 2.3 核——但其中多少是建索引自己的？如果 DDL 线程只占 6 CPU 秒，
-# 那建索引实际只用 0.6 核，说明它根本不是 CPU 瓶颈，而是在等。
-# 这个区分决定了后面该优化计算还是优化等待。
-proc_ddl_cpu_ticks() {
-  local pid="$1"
-  local total=0 tid
-  for tid in /proc/"${pid}"/task/*; do
-    [ -r "${tid}/comm" ] || continue
-    case "$(cat "${tid}/comm" 2>/dev/null)" in
-      DDL_*) ;;
-      *) continue ;;
-    esac
-    [ -r "${tid}/stat" ] || continue
-    local t
-    t="$(awk '{ sub(/^.*\) /, ""); print $12 + $13 }' "${tid}/stat" 2>/dev/null)"
-    total=$((total + ${t:-0}))
-  done
-  printf '%s' "${total}"
-}
+# 建索引线程自己的 CPU 不能用「ALTER 前后取差值」算：DDL 线程池在 ALTER 期间
+# 创建、结束后销毁，两个采样点都看不到它们，差值恒为 0。
+# 正确做法是在 ALTER 期间按 tid 跟踪，见 probe_report()。
 
-proc_ddl_thread_count() {
-  local pid="$1" n=0 tid
-  for tid in /proc/"${pid}"/task/*; do
-    [ -r "${tid}/comm" ] || continue
-    case "$(cat "${tid}/comm" 2>/dev/null)" in
-      DDL_*) n=$((n + 1)) ;;
-    esac
-  done
-  printf '%s' "${n}"
-}
 
 proc_thread_count() {
   local pid="$1"
@@ -265,50 +235,57 @@ time_mysql_command() {
   local name="$1" sql="$2"
   local start_ns end_ns total_sec
   local ticks0="" ticks1="" cpu_sec="" cores="" hz
-  local dticks0="" dticks1="" ddl_cpu="" ddl_cores="" ddl_threads=""
   hz="$(getconf CLK_TCK 2>/dev/null || echo 100)"
   if [ -n "${OBSERVER_PID}" ] && [ -d "/proc/${OBSERVER_PID}" ]; then
     ticks0="$(proc_cpu_ticks "${OBSERVER_PID}")"
-    dticks0="$(proc_ddl_cpu_ticks "${OBSERVER_PID}")"
-    ddl_threads="$(proc_ddl_thread_count "${OBSERVER_PID}")"
   fi
   start_ns=$(now_ns)
   mysql_exec "${sql}" >/dev/null
   end_ns=$(now_ns)
   if [ -n "${ticks0}" ] && [ -d "/proc/${OBSERVER_PID}" ]; then
     ticks1="$(proc_cpu_ticks "${OBSERVER_PID}")"
-    dticks1="$(proc_ddl_cpu_ticks "${OBSERVER_PID}")"
     cpu_sec="$(awk -v a="${ticks0}" -v b="${ticks1}" -v hz="${hz}" 'BEGIN { printf "%.3f", (b - a) / hz }')"
-    ddl_cpu="$(awk -v a="${dticks0}" -v b="${dticks1}" -v hz="${hz}" 'BEGIN { printf "%.3f", (b - a) / hz }')"
   fi
   total_sec=$(elapsed_sec "${start_ns}" "${end_ns}")
   METRICS["${name}_sec"]="${total_sec}"
   if [ -n "${cpu_sec}" ]; then
     cores="$(awk -v c="${cpu_sec}" -v t="${total_sec}" 'BEGIN { if (t > 0) printf "%.2f", c / t; else printf "0" }')"
-    ddl_cores="$(awk -v c="${ddl_cpu}" -v t="${total_sec}" 'BEGIN { if (t > 0) printf "%.2f", c / t; else printf "0" }')"
     METRICS["${name}_cpu_sec"]="${cpu_sec}"
     METRICS["${name}_cores"]="${cores}"
-    METRICS["${name}_ddl_cpu_sec"]="${ddl_cpu}"
-    METRICS["${name}_ddl_cores"]="${ddl_cores}"
-    METRICS["${name}_ddl_threads"]="${ddl_threads:-0}"
-    log "  ${name}: ${total_sec}s  cpu=${cpu_sec}s cores=${cores} | ddl_cpu=${ddl_cpu}s ddl_cores=${ddl_cores} ddl_threads=${ddl_threads:-0}"
+    log "  ${name}: ${total_sec}s  cpu=${cpu_sec}s cores=${cores}"
   else
     log "  ${name}: ${total_sec}s"
   fi
 }
 
 # ---------------------------------------------------------------- thread probe
-# PROBE_THREADS=1：每次 ALTER 期间每 200ms 采一次 observer 里 DDL_* 线程的状态。
+# PROBE_THREADS=1：每次 ALTER 期间每 200ms 采一次 observer 的线程状态。
 #
 # 为什么需要它：Amdahl 反推 build 有 80.8% 是串行的（DOP 1→4 只快 1.169 倍），
-# 而 perf 在本实例被容器封死、gdb 会把 build 拖慢 80 倍。但「线程在等什么」不需要
-# 采样调用栈——/proc/<tid>/wchan 直接给出它阻塞在哪个内核函数上：
-#   futex_wait_queue_me   -> 用户态锁 / 条件变量
-#   io_schedule / wait_on_page_bit -> 磁盘 IO
-#   rwsem_down_read_failed -> 读写信号量
-# 状态位 state=D（不可中断睡眠）几乎一定是 IO，state=S 多半是锁。
-# 这两个维度合起来就能把「80% 串行」拆成 IO 等待 / 锁等待 / 真在算。
+# 而 perf 在本实例被容器封死、gdb 会把 build 拖慢 80 倍。
+#
+# 2026-11-13 实测两条：
+#   1. 这台内核 /proc/<tid>/wchan 恒返回 "0"，改用 /proc/<tid>/syscall 的系统调用号；
+#   2. DDL_* 线程的采样全是 state=S（睡眠），可 ALTER 期间进程烧了 10 秒 CPU
+#      ⇒ 真正干活的线程不叫 DDL_*，必须按线程名统计 CPU 才能找到它。
+# 所以采样分两部分：所有线程的 CPU 增量（按 comm 汇总），以及 DDL_* 线程的
+# state + syscall 明细。
+#
+# 一次 awk 读完所有 stat 文件，避免几百个线程逐个 fork awk。
 PROBE_JOB=""
+
+probe_syscall_name() {
+  case "$1" in
+    0) echo read ;; 1) echo write ;; 2) echo open ;; 3) echo close ;;
+    7) echo poll ;; 17) echo pread64 ;; 18) echo pwrite64 ;;
+    19) echo readv ;; 20) echo writev ;; 23) echo select ;;
+    35) echo nanosleep ;; 56) echo clone ;; 202) echo futex ;;
+    230) echo clock_nanosleep ;; 232) echo epoll_wait ;;
+    271) echo pwritev ;; 281) echo epoll_pwait ;;
+    -1|running) echo running ;;
+    *) echo "nr=$1" ;;
+  esac
+}
 
 probe_start() {
   local out="$1"
@@ -316,17 +293,32 @@ probe_start() {
   rm -f "${TMP_DIR}/probe.stop"
   (
     while [[ ! -f "${TMP_DIR}/probe.stop" ]]; do
-      for t in /proc/"${OBSERVER_PID}"/task/*; do
-        [ -r "${t}/wchan" ] || continue
-        comm="$(cat "${t}/comm" 2>/dev/null)"
+      # 一次 awk 输出 tid|comm|state|cpu，覆盖全部线程。
+      awk '{
+        line = $0
+        tid = line
+        sub(/ .*/, "", tid)
+        sub(/^[0-9]+ \(/, "", line)
+        idx = index(line, ") ")
+        if (idx <= 0) { next }
+        comm = substr(line, 1, idx - 1)
+        rest = substr(line, idx + 2)
+        n = split(rest, f, " ")
+        if (n < 13) { next }
+        printf "%s|%s|%s|%d\n", tid, comm, f[1], f[12] + f[13]
+      }' /proc/"${OBSERVER_PID}"/task/*/stat 2>/dev/null > "${TMP_DIR}/snap.txt" || true
+      # DDL_* 线程额外记录当前系统调用，用来区分等锁 / 等 IO / 等事件。
+      while IFS='|' read -r tid comm state cpu; do
         case "${comm}" in
-          DDL_*) ;;
-          *) continue ;;
+          DDL_*)
+            nr="$(awk 'NR==1 { print $1 }' /proc/"${OBSERVER_PID}"/task/"${tid}"/syscall 2>/dev/null)"
+            echo "${tid}|${comm}|${state}|${cpu}|$(probe_syscall_name "${nr:-?}")"
+            ;;
+          *)
+            echo "${tid}|${comm}|${state}|${cpu}|-"
+            ;;
         esac
-        state="$(awk '{ sub(/^.*\) /, ""); print $1 }' "${t}/stat" 2>/dev/null)"
-        wchan="$(cat "${t}/wchan" 2>/dev/null)"
-        echo "${comm}|${state}|${wchan:-running}"
-      done
+      done < "${TMP_DIR}/snap.txt"
       echo "----"
       sleep 0.2
     done
@@ -337,24 +329,59 @@ probe_start() {
 probe_stop() {
   if [[ -n "${PROBE_JOB}" ]]; then
     : > "${TMP_DIR}/probe.stop"
-    wait "${PROBE_JOB}" 2>/dev/null
+    # job 可能已自己结束，此时 wait 返回 127；set -e 下必须吞掉。
+    wait "${PROBE_JOB}" 2>/dev/null || true
     PROBE_JOB=""
   fi
+}
+
+# 取前 N 名，排序在 awk 里做完。走 `| head` 会因 SIGPIPE 让管道非零，
+# 在 set -euo pipefail 下会把整轮 bench 打断（已经踩过一次）。
+probe_top() {
+  awk -F'|' -v col="$2" -v topn="$3" '
+    $0 == "----" || NF < 5 { next }
+    {
+      v = $col
+      if (v == "" || v == "?" || v == "-" || v == "nr=-1") { next }
+      c[v]++
+    }
+    END {
+      for (i = 0; i < topn; i++) {
+        best = ""; bestc = -1
+        for (k in c) { if (c[k] > bestc) { bestc = c[k]; best = k } }
+        if (best == "") break
+        printf "      %6d  %s\n", bestc, best
+        delete c[best]
+      }
+    }' "$1"
 }
 
 probe_report() {
   local name="$1" out="$2"
   if [[ ! -s "${out}" ]]; then
-    log "  [probe] ${name}: 没采到 DDL 线程（可能这轮没有并行建索引）"
+    log "  [probe] ${name}: 没采到线程"
     return 0
   fi
-  log "  [probe] ${name} 线程状态分布（R=运行 S=可中断睡眠 D=不可中断/IO）:"
-  awk -F'|' 'NF==3 { c[$2]++ } END { for (k in c) printf "      %6d  state=%s\n", c[k], k }' "${out}" | sort -rn | head -6
-  log "  [probe] ${name} wchan 分布（前 8）:"
-  awk -F'|' 'NF==3 { w=$3; if (w=="") w="(空)"; c[w]++ } END { for (k in c) printf "      %6d  %s\n", c[k], k }' "${out}" | sort -rn | head -8
+  local hz samples
+  hz="$(getconf CLK_TCK 2>/dev/null || echo 100)"
+  samples="$(awk '$0 == "----" { n++ } END { print n + 0 }' "${out}")"
+  log "  [probe] ${name}: 采样点=${samples}"
+  log "    DDL_* 线程状态分布（R=运行 S=可中断/等锁 D=不可中断/等IO）:"
+  awk -F'|' '$0 == "----" || NF < 5 { next } $2 ~ /^DDL_/ { c[$3]++ } END { for (k in c) printf "      %6d  %s\n", c[k], k }' "${out}"
+  log "    DDL_* 线程系统调用分布（futex=等锁 pwrite=写盘 epoll_wait=等事件）:"
+  probe_top "${out}" 5 6
+  # 按线程名汇总 CPU 增量：每个 tid 取 utime+stime 峰值（线程会销毁，事后读归零）。
+  log "    消耗 CPU 最多的线程名（按 tid 峰值累加，秒）:"
+  awk -F'|' -v hz="${hz}" '
+      $0 == "----" || NF < 5 { next }
+      { if ($4 + 0 > peak[$1]) { peak[$1] = $4 + 0; comm[$1] = $2 } }
+      END {
+        for (t in peak) { s[comm[t]] += peak[t] }
+        for (k in s) { printf "%.3f %s\n", s[k] / hz, k }
+      }' "${out}" | sort -rn | awk 'NR<=10 { printf "      %8.3f s  %s\n", $1, $2 }'
 }
 
-# ---------------------------------------------------------------- build profiling
+# ---------------------------------------------------------------- build profiling# ---------------------------------------------------------------- build profiling# ---------------------------------------------------------------- build profiling
 # PROFILE_BUILD=1：在三次 ALTER 期间给 observer 采样，回答「build 的 4~6s/索引 到底花在哪个函数」。
 #
 # 为什么需要它：build 占评分 coeff 的 52%，而我们只知道「写行 300K 行/秒」这一个间接数字，
@@ -527,11 +554,8 @@ write_report() {
     echo "build_total_sec:        ${METRICS[build_total_sec]:-N/A}"
     echo "build_cpu_sec:          ik_all=${METRICS[build_ik_all_cpu_sec]:-N/A} content=${METRICS[build_ik_content_cpu_sec]:-N/A} beng=${METRICS[build_beng_en_cpu_sec]:-N/A}"
     echo "build_cores:            ik_all=${METRICS[build_ik_all_cores]:-N/A} content=${METRICS[build_ik_content_cores]:-N/A} beng=${METRICS[build_beng_en_cores]:-N/A}"
-    # build_ddl_cores 只算 DDL_* 线程，是建索引自己的并行度。
-    # build_cores 是整个 observer 进程的（含后台合并/日志），两者不可混用。
-    echo "build_ddl_cpu_sec:      ik_all=${METRICS[build_ik_all_ddl_cpu_sec]:-N/A} content=${METRICS[build_ik_content_ddl_cpu_sec]:-N/A} beng=${METRICS[build_beng_en_ddl_cpu_sec]:-N/A}"
-    echo "build_ddl_cores:        ik_all=${METRICS[build_ik_all_ddl_cores]:-N/A} content=${METRICS[build_ik_content_ddl_cores]:-N/A} beng=${METRICS[build_beng_en_ddl_cores]:-N/A}"
-    echo "build_ddl_threads:      ik_all=${METRICS[build_ik_all_ddl_threads]:-N/A} content=${METRICS[build_ik_content_ddl_threads]:-N/A} beng=${METRICS[build_beng_en_ddl_threads]:-N/A}"
+    # build_cores 是整个 observer 进程的（含后台合并/日志），不等于建索引的并行度。
+    # 建索引线程自己的 CPU 见 PROBE_THREADS=1 的报告。
     # 墙钟受调度和后台合并影响，同一二进制两轮能有 3% 以上的差；CPU 秒只反映真实
     # 工作量，是判断「每行开销」类改动的可靠指标，所以单独给一个合计数。
     echo "build_cpu_total_sec:    ${METRICS[build_cpu_total_sec]:-$(awk -v a="${METRICS[build_ik_all_cpu_sec]:-0}" \
