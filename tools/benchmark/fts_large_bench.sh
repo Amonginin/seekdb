@@ -424,6 +424,12 @@ write_report() {
     echo "build_total_sec:        ${METRICS[build_total_sec]:-N/A}"
     echo "build_cpu_sec:          ik_all=${METRICS[build_ik_all_cpu_sec]:-N/A} content=${METRICS[build_ik_content_cpu_sec]:-N/A} beng=${METRICS[build_beng_en_cpu_sec]:-N/A}"
     echo "build_cores:            ik_all=${METRICS[build_ik_all_cores]:-N/A} content=${METRICS[build_ik_content_cores]:-N/A} beng=${METRICS[build_beng_en_cores]:-N/A}"
+    # 墙钟受调度和后台合并影响，同一二进制两轮能有 3% 以上的差；CPU 秒只反映真实
+    # 工作量，是判断「每行开销」类改动的可靠指标，所以单独给一个合计数。
+    echo "build_cpu_total_sec:    $(awk -v a="${METRICS[build_ik_all_cpu_sec]:-0}" \
+                                          -v b="${METRICS[build_ik_content_cpu_sec]:-0}" \
+                                          -v c="${METRICS[build_beng_en_cpu_sec]:-0}" \
+                                          'BEGIN { printf "%.3f", a + b + c }')"
     echo "----------------------------------------"
     echo "tokenize_ik_avg_ms:     ${METRICS[tokenize_ik_avg_ms]:-N/A}"
     echo "tokenize_ik_median_ms:  ${METRICS[tokenize_ik_median_ms]:-N/A}"

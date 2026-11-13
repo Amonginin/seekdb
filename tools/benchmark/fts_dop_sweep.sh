@@ -20,6 +20,9 @@ LOG_DIR="${LOG_DIR:-/tmp/recover}"
 DOPS="${DOPS:-1 2 3 4 6 8}"
 BUILD_REPEATS="${BUILD_REPEATS:-2}"
 
+# 主逻辑必须包在函数里：check_bench_scripts.py 会把函数体剥掉后真跑一遍顶层，
+# 顶层留着裸 for 循环的话，检查器会真的去跑 6 轮 bench，30 秒超时后判定"脚本卡住"。
+main() {
 mkdir -p "${LOG_DIR}"
 summary="${LOG_DIR}/dop_sweep.txt"
 : > "${summary}"
@@ -73,3 +76,6 @@ echo | tee -a "${summary}"
 echo "汇总（按 build_total 升序；shape 正常约 all=1.29,beng=0.55，明显偏离即单相卡顿）" | tee -a "${summary}"
 grep '^DOP=' "${summary}" | sort -t= -k3 -n | head -10 | tee -a "${summary}"
 echo "完整结果：${summary}"
+}
+
+main "$@"
