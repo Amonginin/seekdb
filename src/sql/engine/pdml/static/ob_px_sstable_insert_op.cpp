@@ -531,6 +531,12 @@ int ObPxMultiPartSSTableInsertOp::write_ordered_slice_by_row()
   int64_t write_max_ns = 0;
   int64_t scan_stall_cnt = 0;
   int64_t row_seq = 0;
+  // 一个 worker 覆盖了几个 slice：配了 8 个 writer，但只有 3 个 worker 拿到数据。
+  // 是「一个 worker 串行驱动多个 slice」（分配问题），还是「某个 slice 边界就含
+  // 99% 的行」（切分问题）—— 这两个数的差别决定了改哪里。
+  int64_t first_slice = -1;
+  int64_t last_slice_seen = -1;
+  int64_t slice_switches = 0;
   while (OB_SUCC(ret) && !is_all_partition_finished_) {
     ++rows_total;
     // 进入循环的第一行打一个锚点。日志自带毫秒时间戳，把它和 bench 记录的
@@ -569,6 +575,11 @@ int ObPxMultiPartSSTableInsertOp::write_ordered_slice_by_row()
     } else if (OB_FAIL(slice_writer->append_row(
                    data_plane::ObDirectInsertRowView(
                        datums.get_data(), datums.count())))) {
+    }
+    if (OB_SUCC(ret) && !is_all_partition_finished_ && slice_param.slice_idx_ != last_slice_seen) {
+      last_slice_seen = slice_param.slice_idx_;
+      if (first_slice < 0) { first_slice = last_slice_seen; }
+      ++slice_switches;
     }
     if (sampled && OB_SUCC(ret) && !is_all_partition_finished_ && 0 != t1) {
       t4 = ObTimeUtility::current_time();
@@ -623,7 +634,10 @@ int ObPxMultiPartSSTableInsertOp::write_ordered_slice_by_row()
              "write_ms", write_total_ns / 1000000,
              "scan_max_ns", scan_max_ns,
              "write_max_ns", write_max_ns,
-             "scan_stalls_gt_1ms", scan_stall_cnt);
+             "scan_stalls_gt_1ms", scan_stall_cnt,
+             "first_slice", first_slice,
+             "last_slice", last_slice_seen,
+             "slice_switches", slice_switches);
   }
   return ret;
 }
