@@ -51,6 +51,13 @@ WARMUP="${WARMUP:-30}"
 SKIP_LOAD="${SKIP_LOAD:-0}"
 PROFILE_BUILD="${PROFILE_BUILD:-0}"
 PROBE_THREADS="${PROBE_THREADS:-0}"
+# DDL 并行度覆盖：会话级变量 _force_parallel_ddl_dop。
+# 默认值 1，而 DDL 规划器按「hint > 该变量 > 表 dop > 1」取值
+# （ob_ddl_resolver.cpp:7952 calc_ddl_parallelism）。docs 是单分区表、建表没写
+# PARALLEL，所以理论并行度就是 1；这个变量是唯一不需要改代码就能把它抬起来的开关。
+# >1 时本脚本在每条 SQL 前注入 SET SESSION，从而对紧随其后的 ALTER 生效。
+DDL_DOP="${DDL_DOP:-0}"
+DDL_DOP_SQL=""
 OUTPUT="${OUTPUT:-}"
 
 IK_TEXT="OceanBase是一款非常稳定的数据库，全文索引的分词器热路径优化包括解析器实例复用、停用词全局单例、内存池化数据结构等技术，在大量文档索引和查询场景下可以显著降低 CPU 开销。"
@@ -83,7 +90,21 @@ elapsed_ms() {
   awk "BEGIN {printf \"%.3f\", (${end_ns} - ${start_ns}) / 1000000}"
 }
 
-mysql_exec() { $MYSQL -e "SET NAMES utf8mb4; SET ob_query_timeout = 100000000000; SET ob_trx_timeout = 100000000000; $1"; }
+mysql_exec() { $MYSQL -e "SET NAMES utf8mb4; SET ob_query_timeout = 100000000000; SET ob_trx_timeout = 100000000000; ${DDL_DOP_SQL}$1"; }
+
+# 先试一次 SET：不同版本/发行版未必有这个变量，失败就明确说无效，
+# 而不是让后面每条 ALTER 都因为一句 SET 报错而整体失败。
+setup_ddl_dop() {
+  if [[ ! "${DDL_DOP}" =~ ^[0-9]+$ ]] || [[ "${DDL_DOP}" -le 1 ]]; then
+    return 0
+  fi
+  if $MYSQL -e "SET SESSION _force_parallel_ddl_dop=${DDL_DOP};" >/dev/null 2>&1; then
+    DDL_DOP_SQL="SET SESSION _force_parallel_ddl_dop=${DDL_DOP}; "
+    log "DDL 并行度覆盖：_force_parallel_ddl_dop=${DDL_DOP}（会话级，对后续 ALTER 生效）"
+  else
+    log "WARN: 该版本不支持 _force_parallel_ddl_dop，DDL_DOP=${DDL_DOP} 被忽略"
+  fi
+}
 
 validate_positive_int() {
   local name="$1" value="$2"
@@ -261,17 +282,18 @@ time_mysql_command() {
 # ---------------------------------------------------------------- thread probe
 # PROBE_THREADS=1：每次 ALTER 期间每 200ms 采一次 observer 的线程状态。
 #
-# 为什么需要它：Amdahl 反推 build 有 80.8% 是串行的（DOP 1→4 只快 1.169 倍），
-# 而 perf 在本实例被容器封死、gdb 会把 build 拖慢 80 倍。
+# 为什么需要它：Amdahl 反推 build 有 80.8% 是串行的（DOP 1→4 只快 1.169 倍）。
+# perf 在本实例被封死（perf_event_open 被容器拒绝），gdb 会把 build 拖慢 80 倍，
+# 而 /proc 不需要 profiler。
 #
-# 2026-11-13 实测两条：
-#   1. 这台内核 /proc/<tid>/wchan 恒返回 "0"，改用 /proc/<tid>/syscall 的系统调用号；
-#   2. DDL_* 线程的采样全是 state=S（睡眠），可 ALTER 期间进程烧了 10 秒 CPU
-#      ⇒ 真正干活的线程不叫 DDL_*，必须按线程名统计 CPU 才能找到它。
-# 所以采样分两部分：所有线程的 CPU 增量（按 comm 汇总），以及 DDL_* 线程的
-# state + syscall 明细。
+# 2026-11-14 实测三条教训，直接决定了这个实现：
+#   1. /proc/<tid>/wchan 在这台内核恒为 "0"，改读 /proc/<tid>/syscall 的调用号；
+#   2. DDL_* 线程单次 ALTER 只烧 0.4s CPU，PX_G* 才是主力（约 8s / 9.9s）；
+#   3. 线程池里大量空闲线程会把统计淹没（它们永远在 futex 上等任务），
+#      所以 state/syscall 只统计「CPU 比上一个采样点有增长」的活跃样本。
 #
-# 一次 awk 读完所有 stat 文件，避免几百个线程逐个 fork awk。
+# 输出按 tid 展开。PX_G0 可能对应多个 tid（同一 group 的多个 worker），
+# 只按名字聚合看不出开了几个 worker —— 而 worker 数正是并行度的硬上限。
 PROBE_JOB=""
 
 probe_syscall_name() {
@@ -292,8 +314,10 @@ probe_start() {
   : > "${out}"
   rm -f "${TMP_DIR}/probe.stop"
   (
+    seq=0
     while [[ ! -f "${TMP_DIR}/probe.stop" ]]; do
-      # 一次 awk 输出 tid|comm|state|cpu，覆盖全部线程。
+      seq=$((seq + 1))
+      # 一次 awk 读完所有线程的 stat：几百个线程逐个 fork awk 会把采样开销做到秒级。
       awk '{
         line = $0
         tid = line
@@ -307,78 +331,87 @@ probe_start() {
         if (n < 13) { next }
         printf "%s|%s|%s|%d\n", tid, comm, f[1], f[12] + f[13]
       }' /proc/"${OBSERVER_PID}"/task/*/stat 2>/dev/null > "${TMP_DIR}/snap.txt" || true
-      # DDL_* 线程额外记录当前系统调用，用来区分等锁 / 等 IO / 等事件。
+
       while IFS='|' read -r tid comm state cpu; do
         case "${comm}" in
-          DDL_*)
-            nr="$(awk 'NR==1 { print $1 }' /proc/"${OBSERVER_PID}"/task/"${tid}"/syscall 2>/dev/null)"
-            echo "${tid}|${comm}|${state}|${cpu}|$(probe_syscall_name "${nr:-?}")"
-            ;;
-          *)
-            echo "${tid}|${comm}|${state}|${cpu}|-"
-            ;;
+          PX_*|DDL_*) ;;
+          *) continue ;;
         esac
+        nr="?"
+        read -r nr _rest < "/proc/${OBSERVER_PID}/task/${tid}/syscall" 2>/dev/null || nr="?"
+        printf '%s|%s|%s|%s|%s|%s\n' "${seq}" "${tid}" "${comm}" "${state}" "${cpu}" "$(probe_syscall_name "${nr}")"
       done < "${TMP_DIR}/snap.txt"
-      echo "----"
       sleep 0.2
     done
-  ) >> "${out}" &
+  ) >> "${out}" 2>/dev/null &
   PROBE_JOB=$!
 }
 
 probe_stop() {
   if [[ -n "${PROBE_JOB}" ]]; then
     : > "${TMP_DIR}/probe.stop"
-    # job 可能已自己结束，此时 wait 返回 127；set -e 下必须吞掉。
+    # 采样循环被 stop 文件打断时退出码非 0，job 也可能已被回收；set -e 下必须吞掉。
     wait "${PROBE_JOB}" 2>/dev/null || true
     PROBE_JOB=""
   fi
 }
 
-# 取前 N 名，排序在 awk 里做完。走 `| head` 会因 SIGPIPE 让管道非零，
-# 在 set -euo pipefail 下会把整轮 bench 打断（已经踩过一次）。
-probe_top() {
-  awk -F'|' -v col="$2" -v topn="$3" '
-    $0 == "----" || NF < 5 { next }
-    {
-      v = $col
-      if (v == "" || v == "?" || v == "-" || v == "nr=-1") { next }
-      c[v]++
-    }
-    END {
-      for (i = 0; i < topn; i++) {
-        best = ""; bestc = -1
-        for (k in c) { if (c[k] > bestc) { bestc = c[k]; best = k } }
-        if (best == "") break
-        printf "      %6d  %s\n", bestc, best
-        delete c[best]
-      }
-    }' "$1"
-}
-
 probe_report() {
-  local name="$1" out="$2"
+  local name="$1" out="$2" wall="${3:-0}"
   if [[ ! -s "${out}" ]]; then
     log "  [probe] ${name}: 没采到线程"
     return 0
   fi
   local hz samples
   hz="$(getconf CLK_TCK 2>/dev/null || echo 100)"
-  samples="$(awk '$0 == "----" { n++ } END { print n + 0 }' "${out}")"
-  log "  [probe] ${name}: 采样点=${samples}"
-  log "    DDL_* 线程状态分布（R=运行 S=可中断/等锁 D=不可中断/等IO）:"
-  awk -F'|' '$0 == "----" || NF < 5 { next } $2 ~ /^DDL_/ { c[$3]++ } END { for (k in c) printf "      %6d  %s\n", c[k], k }' "${out}"
-  log "    DDL_* 线程系统调用分布（futex=等锁 pwrite=写盘 epoll_wait=等事件）:"
-  probe_top "${out}" 5 6
-  # 按线程名汇总 CPU 增量：每个 tid 取 utime+stime 峰值（线程会销毁，事后读归零）。
-  log "    消耗 CPU 最多的线程名（按 tid 峰值累加，秒）:"
-  awk -F'|' -v hz="${hz}" '
-      $0 == "----" || NF < 5 { next }
-      { if ($4 + 0 > peak[$1]) { peak[$1] = $4 + 0; comm[$1] = $2 } }
-      END {
-        for (t in peak) { s[comm[t]] += peak[t] }
-        for (k in s) { printf "%.3f %s\n", s[k] / hz, k }
-      }' "${out}" | sort -rn | awk 'NR<=10 { printf "      %8.3f s  %s\n", $1, $2 }'
+  samples="$(awk -F'|' 'NF>=6 { if ($1+0 > m) m = $1+0 } END { print m+0 }' "${out}")"
+  log "  [probe] ${name}: 采样点=${samples}  窗口=${wall}s"
+
+  # ① 每个 tid 的窗口内 CPU = 末次 - 首次。注意不能用峰值，那是进程启动以来的累计值。
+  awk -F'|' -v hz="${hz}" -v wall="${wall}" '
+    NF >= 6 {
+      tid = $2; comm = $3; cpu = $5 + 0
+      if (!(tid in first)) { first[tid] = cpu; commof[tid] = comm; tids[++n] = tid }
+      last[tid] = cpu
+    }
+    END {
+      pxn = 0; pxsum = 0; ddn = 0; ddsum = 0
+      for (i = 1; i <= n; i++) {
+        t = tids[i]; d = last[t] - first[t]
+        if (commof[t] ~ /^PX_/) { pxn++; pxsum += d; printf "PXROW\t%s\t%s\t%.2f\n", commof[t], t, d / hz }
+        else if (d > 0) { ddn++; ddsum += d }
+      }
+      printf "PXSUM\t%d\t%.2f\t%.2f\n", pxn, pxsum / hz, (wall > 0 ? pxsum / hz / wall : 0)
+      printf "DDLSUM\t%d\t%.2f\n", ddn, ddsum / hz
+    }' "${out}" > "${TMP_DIR}/probe_p1.txt"
+
+  log "    PX worker：线程数=$(awk -F'\t' '$1=="PXSUM"{print $2}' "${TMP_DIR}/probe_p1.txt")  CPU=$(awk -F'\t' '$1=="PXSUM"{print $3}' "${TMP_DIR}/probe_p1.txt")s  有效并行度=$(awk -F'\t' '$1=="PXSUM"{print $4}' "${TMP_DIR}/probe_p1.txt")"
+  awk -F'\t' '$1=="PXROW" && $4+0 > 0' "${TMP_DIR}/probe_p1.txt" \
+    | sort -t"	" -k4,4gr \
+    | awk -F'\t' 'NR<=8 { printf "      %s tid=%-8s cpu=%ss\n", $2, $3, $4 }'
+  log "    DDL 活跃线程：数=$(awk -F'\t' '$1=="DDLSUM"{print $2}' "${TMP_DIR}/probe_p1.txt")  CPU=$(awk -F'\t' '$1=="DDLSUM"{print $3}' "${TMP_DIR}/probe_p1.txt")s"
+
+  # ② 只统计活跃样本：CPU 比上一个采样点有增长，说明这个间隔内确实在干活。
+  awk -F'|' '
+    NF >= 6 {
+      tid = $2; comm = $3; state = $4; cpu = $5 + 0; sc = $6
+      grp = (comm ~ /^PX_/) ? "PX" : "DDL"
+      if ((tid in prev) && cpu > prev[tid]) { st[grp "|" state]++; scn[grp "|" sc]++; cnt[grp]++ }
+      prev[tid] = cpu
+    }
+    END {
+      split("PX DDL", g, " ")
+      for (i = 1; i <= 2; i++) {
+        k = g[i]
+        if (cnt[k] + 0 == 0) continue
+        line = "    " k " 活跃样本 state:"
+        for (x in st) { split(x, a, "|"); if (a[1] == k) line = line sprintf(" %s=%.0f%%", a[2], 100 * st[x] / cnt[k]) }
+        print line
+        line = "    " k " 活跃样本 syscall:"
+        for (x in scn) { split(x, a, "|"); if (a[1] == k && scn[x] * 100 / cnt[k] >= 5) line = line sprintf(" %s=%.0f%%", a[2], 100 * scn[x] / cnt[k]) }
+        print line
+      }
+    }' "${out}"
 }
 
 # ---------------------------------------------------------------- build profiling# ---------------------------------------------------------------- build profiling# ---------------------------------------------------------------- build profiling
@@ -543,6 +576,7 @@ write_report() {
     echo "samples:                ${SAMPLES}"
     echo "warmup:                 ${WARMUP}"
     echo "skip_load:              ${SKIP_LOAD}"
+    echo "ddl_dop:                ${DDL_DOP}"
     echo "----------------------------------------"
     echo "select1_avg_ms:         ${METRICS[select1_avg_ms]:-N/A}"
     echo "select1_stdev_ms:       ${METRICS[select1_stdev_ms]:-N/A}"
@@ -606,6 +640,8 @@ fi
 
 log "=== FTS Large Benchmark (label=${LABEL}) ==="
 log "rows=${ROWS} batch=${BATCH} rounds=${ROUNDS} query_rounds=${QUERY_ROUNDS} samples=${SAMPLES}"
+
+setup_ddl_dop
 
 log "[0/5] SQL baseline ..."
 run_repeated_sql_bench "select1" "${ROUNDS}" "SELECT 1;"
@@ -679,17 +715,17 @@ if [[ "${SKIP_LOAD}" != "1" ]]; then
     if [[ "${PROBE_THREADS}" == "1" ]]; then probe_start "${TMP_DIR}/probe_ik_all.txt"; fi
     time_mysql_command "build_ik_all" \
       "USE fts_large_bench; ALTER TABLE docs ADD FULLTEXT INDEX fti_all_ik(title, content) WITH PARSER ik;"
-    if [[ "${PROBE_THREADS}" == "1" ]]; then probe_stop; probe_report "build_ik_all" "${TMP_DIR}/probe_ik_all.txt"; fi
+    if [[ "${PROBE_THREADS}" == "1" ]]; then probe_stop; probe_report "build_ik_all" "${TMP_DIR}/probe_ik_all.txt" "${METRICS[build_ik_all_sec]:-0}"; fi
 
     if [[ "${PROBE_THREADS}" == "1" ]]; then probe_start "${TMP_DIR}/probe_content.txt"; fi
     time_mysql_command "build_ik_content" \
       "USE fts_large_bench; ALTER TABLE docs ADD FULLTEXT INDEX fti_content_ik(content) WITH PARSER ik;"
-    if [[ "${PROBE_THREADS}" == "1" ]]; then probe_stop; probe_report "build_ik_content" "${TMP_DIR}/probe_content.txt"; fi
+    if [[ "${PROBE_THREADS}" == "1" ]]; then probe_stop; probe_report "build_ik_content" "${TMP_DIR}/probe_content.txt" "${METRICS[build_ik_content_sec]:-0}"; fi
 
     if [[ "${PROBE_THREADS}" == "1" ]]; then probe_start "${TMP_DIR}/probe_beng.txt"; fi
     time_mysql_command "build_beng_en" \
       "USE fts_large_bench; ALTER TABLE docs ADD FULLTEXT INDEX fti_en_beng(title_en, content_en) WITH PARSER beng;"
-    if [[ "${PROBE_THREADS}" == "1" ]]; then probe_stop; probe_report "build_beng_en" "${TMP_DIR}/probe_beng.txt"; fi
+    if [[ "${PROBE_THREADS}" == "1" ]]; then probe_stop; probe_report "build_beng_en" "${TMP_DIR}/probe_beng.txt" "${METRICS[build_beng_en_sec]:-0}"; fi
     build_end_ns=$(now_ns)
     if [[ "${PROFILE_BUILD}" == "1" && "${r}" -eq 1 ]]; then
       profile_stop
