@@ -633,13 +633,7 @@ int ObPxFifoReceiveOp::fetch_rows(const int64_t row_cnt)
         if (ObTimeUtility::current_time() >= timeout_ts) {
           ret = OB_TIMEOUT;
         } else {
-          // 生产者通常只落后几十微秒，而这里固定睡 1 毫秒：一次 fetch 只取一个
-          // batch，于是「等 50us」被放大成「等 1ms」，整轮建索引累积成秒级空转
-          // （实测构建期间 worker 有 19% 的活跃采样停在 clock_nanosleep）。
-          // 前若干次重试改成 50us 短睡，仍未就绪再退回 1ms，避免长期空转烧 CPU。
-          // 只是缩短重试间隔，取数逻辑与结果不变。
-          const int64_t wait_us = retry_cnt < 8 ? 50 : 1 * 1000;
-          ob_usleep<ObWaitEventIds::DTL_PROCESS_CHANNEL_SLEEP>(wait_us);
+          ob_usleep<ObWaitEventIds::DTL_PROCESS_CHANNEL_SLEEP>(1 * 1000);
           int tmp_ret = ctx_.fast_check_status();
           if (OB_SUCCESS != tmp_ret) {
             LOG_WARN("wait to receive row interrupted", K(tmp_ret), K(ret));
