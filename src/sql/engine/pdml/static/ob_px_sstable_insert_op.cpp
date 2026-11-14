@@ -509,8 +509,23 @@ int ObPxMultiPartSSTableInsertOp::write_ordered_slice_by_row()
   // Sampling split of the four phases of each posting row. Disabled with
   // OB_FTS_NO_ROW_TIMING=1 so the same binary can be A/B tested.
   const bool timing_enabled = (nullptr == ::getenv("OB_FTS_NO_ROW_TIMING"));
+  // 除了四个分段，还要知道「这个函数总共花了多久」和「close 刷盘花了多久」。
+  // 之前只统计循环体内部，如果时间其实在 sync_tablet_doc_id / slice_writer->close()
+  // 上，逐行优化就是白做；这里把两段分明地量出来。
+  const int64_t fn_start_us = timing_enabled ? ObTimeUtility::current_time() : 0;
+  int64_t loop_end_us = 0;
+  int64_t rows_total = 0;
+  int64_t samples_total = 0;
+  int64_t scan_total_ns = 0;
+  int64_t misc_total_ns = 0;
+  int64_t eval_total_ns = 0;
+  int64_t write_total_ns = 0;
+  int64_t scan_max_ns = 0;
+  int64_t write_max_ns = 0;
+  int64_t scan_stall_cnt = 0;
   int64_t row_seq = 0;
   while (OB_SUCC(ret) && !is_all_partition_finished_) {
+    ++rows_total;
     const bool sampled = timing_enabled && (0 == (row_seq++ & FTS_ROW_TIMING_MASK));
     int64_t t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0;
     if (sampled) {
@@ -549,11 +564,26 @@ int ObPxMultiPartSSTableInsertOp::write_ordered_slice_by_row()
       tl_fts_eval_us += t3 - t2;
       tl_fts_write_us += t4 - t3;
       ++tl_fts_sample_cnt;
+      ++samples_total;
+      {
+        const int64_t scan_ns = (t1 - t0) * 1000;
+        const int64_t misc_ns = (t2 - t1) * 1000;
+        const int64_t eval_ns = (t3 - t2) * 1000;
+        const int64_t write_ns = (t4 - t3) * 1000;
+        scan_total_ns += scan_ns;
+        misc_total_ns += misc_ns;
+        eval_total_ns += eval_ns;
+        write_total_ns += write_ns;
+        if (scan_ns > scan_max_ns) { scan_max_ns = scan_ns; }
+        if (write_ns > write_max_ns) { write_max_ns = write_ns; }
+        if (scan_ns > 1000000) { ++scan_stall_cnt; }
+      }
       if (0 == (tl_fts_sample_cnt % FTS_ROW_TIMING_REPORT_SAMPLES)) {
         report_fts_row_timing();
       }
     }
   }
+  loop_end_us = timing_enabled ? ObTimeUtility::current_time() : 0;
   report_fts_row_timing();
   if (OB_SUCC(ret) && is_all_partition_finished_ && nullptr != slice_writer) {
     if (need_idempotent_doc_id_ && OB_FAIL(sync_tablet_doc_id(slice_writer))) {
@@ -564,6 +594,23 @@ int ObPxMultiPartSSTableInsertOp::write_ordered_slice_by_row()
   // ignore ret
   if (nullptr != slice_writer) {
     data_plane::ObIDirectInsertWriterFactory::destroy(slice_writer);
+  }
+  if (timing_enabled) {
+    // 一个 worker 一行：循环体 vs 收尾刷盘各占多少，以及四段的总量。
+    // rows_total/samples_total 用来确认 1/128 采样是否成立。
+    const int64_t now_us = ObTimeUtility::current_time();
+    LOG_INFO("fts ddl row loop total",
+             "rows", rows_total,
+             "samples", samples_total,
+             "loop_ms", (loop_end_us - fn_start_us) / 1000,
+             "close_ms", (now_us - loop_end_us) / 1000,
+             "scan_ms", scan_total_ns / 1000000,
+             "misc_ms", misc_total_ns / 1000000,
+             "eval_ms", eval_total_ns / 1000000,
+             "write_ms", write_total_ns / 1000000,
+             "scan_max_ns", scan_max_ns,
+             "write_max_ns", write_max_ns,
+             "scan_stalls_gt_1ms", scan_stall_cnt);
   }
   return ret;
 }
