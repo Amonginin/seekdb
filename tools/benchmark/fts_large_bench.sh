@@ -412,6 +412,41 @@ probe_report() {
         print line
       }
     }' "${out}"
+  # ③ 瞬时并行度：每个采样点有几个 worker 同时在算。
+  #    平均值（有效并行度）只说明「总共吃了几个核」，分不清是「2 个 worker 全程跑满」
+  #    还是「8 个 worker 轮流跑」——这两种情况的瓶颈完全不同，前者卡在 worker 数，
+  #    后者卡在共享资源或调度。时间线把每个 worker 的忙闲直接画出来。
+  awk -F'|' '
+    NF >= 6 {
+      sq = $1 + 0; tid = $2; comm = $3; cpu = $5 + 0
+      if (sq > maxs) maxs = sq
+      if (!(tid in prev)) { name[tid] = comm; order[++nt] = tid; tl[tid] = "" }
+      while (length(tl[tid]) < sq - 1) tl[tid] = tl[tid] "."
+      if ((tid in prev) && cpu > prev[tid]) { tl[tid] = tl[tid] "*"; k[sq]++; busy[tid]++ }
+      else { tl[tid] = tl[tid] "." }
+      prev[tid] = cpu
+    }
+    END {
+      if (maxs <= 0) exit
+      for (q = 1; q <= maxs; q++) hist[k[q] + 0]++
+      line = "    瞬时并行度分布（每个采样点同时在算的 PX worker 数）:"
+      for (q = 1; q <= 16; q++) if (hist[q] > 0) line = line sprintf(" %d个=%.0f%%", q, 100 * hist[q] / maxs)
+      print line
+      # 按忙的次数排序，取前 8 条时间线
+      for (i = 1; i <= nt; i++) {
+        t = order[i]
+        printf "TLLINE\t%d\t%s\t%s\n", busy[t] + 0, name[t], t
+      }
+      for (i = 1; i <= nt; i++) printf "TLCONTENT\t%s\t%s\n", order[i], tl[order[i]]
+    }' "${out}" > "${TMP_DIR}/probe_p2.txt"
+
+  awk -F'	' '$1=="TLLINE"' "${TMP_DIR}/probe_p2.txt" | sort -t"	" -k2,2gr | awk -F'	' 'NR<=8 { printf "%s\t%s\t%s\n", $2, $3, $4 }' > "${TMP_DIR}/probe_top.txt"
+  grep -v '^TL' "${TMP_DIR}/probe_p2.txt"
+  log "    各 worker 忙闲时间线（*=这段时间在算 .=空闲，每个字符 200ms，只列最忙的 8 个）:"
+  while IFS="$(printf '\t')" read -r cnt nm tid; do
+    tl="$(awk -F'\t' -v t="${tid}" '$1=="TLCONTENT" && $2==t { print $3 }' "${TMP_DIR}/probe_p2.txt")"
+    printf '      %-8s tid=%-8s busy=%-3s %s\n' "${nm}" "${tid}" "${cnt}" "${tl}"
+  done < "${TMP_DIR}/probe_top.txt"
 }
 
 # ---------------------------------------------------------------- build profiling# ---------------------------------------------------------------- build profiling# ---------------------------------------------------------------- build profiling
