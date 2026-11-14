@@ -142,6 +142,10 @@ const ObPxMultiPartSSTableInsertSpec &ObPxMultiPartSSTableInsertOp::get_spec() c
 int ObPxMultiPartSSTableInsertOp::inner_open()
 {
   int ret = OB_SUCCESS;
+  // 逐行埋点已经把行成本定死在 1.4us/行（七个 worker 规模从 3.8 万行到 69 万行，
+  // 数值一致），但每个 worker 仍有约 0.6 秒 CPU 落在循环之外。这里量 open：
+  // 如果它占大头，那 build 的固定成本就在会话/切片写入器的创建上，而不在数据上。
+  const int64_t open_begin_us = ObTimeUtility::current_time();
   if (OB_FAIL(ObPxMultiPartInsertOp::inner_open())) {
   } else if (OB_ISNULL(ctx_.get_sqc_handler())) {
     ret = OB_ERR_UNEXPECTED;
@@ -161,6 +165,9 @@ int ObPxMultiPartSSTableInsertOp::inner_open()
       } else if (is_heap_plan() && OB_FAIL(heap_tablet_writer_map_.create(MAP_HASH_BUCKET_NUM, ObMemAttr("tblt_writer_map")))) {
       }
     }
+  }
+  if (nullptr == ::getenv("OB_FTS_NO_ROW_TIMING")) {
+    LOG_INFO("fts ddl insert open", "open_us", ObTimeUtility::current_time() - open_begin_us, K(ret));
   }
   return ret;
 }

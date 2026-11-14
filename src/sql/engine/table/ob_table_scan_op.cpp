@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include <stdlib.h>
+#include "lib/time/ob_time_utility.h"
 #include "data_plane/transaction/ob_transaction_version.h"
 
 
@@ -3651,15 +3652,24 @@ int ObTableScanOp::fetch_next_fts_index_rows()
 {
   int ret = OB_SUCCESS;
   bool has_segment_word = false;
+  // 一个文档一次：把「从主表读一行」和「分词展开」分开计时。
+  // 逐行埋点测到每个 worker 的 scan 总时间里 99.99% 来自一次 0.76~2.06 秒的阻塞，
+  // 但那次阻塞发生在 child_->get_next_row() 里，无法区分是扫描侧慢、还是等 PX
+  // 生产者 DFO 送第一批数据。这里在扫描侧再切一刀，超过 20ms 或第一次调用就记一行。
+  static const bool fts_fetch_timing = (nullptr == ::getenv("OB_FTS_NO_ROW_TIMING"));
+  static thread_local int64_t tl_fetch_seq = 0;
   while (OB_SUCC(ret) && !has_segment_word) {
     ObExpr *ft_expr = nullptr;
     ObExpr *doc_id_expr = nullptr;
     ObDatum *ft_datum = nullptr;
     ObDatum *doc_id_datum = nullptr;
+    const int64_t t_fetch0 = fts_fetch_timing ? ObTimeUtility::current_time() : 0;
+    int64_t t_scan1 = 0;
 
     if (OB_FAIL(ObTableScanOp::inner_get_next_row_implement())) {
       if (OB_ITER_END != ret) {
       }
+    } else if (FALSE_IT(t_scan1 = fts_fetch_timing ? ObTimeUtility::current_time() : 1)) {
     } else if (OB_FAIL(get_output_fts_col_expr_by_type(T_FUN_SYS_DOC_ID, doc_id_expr))) {
     } else if (OB_FAIL(get_output_fts_col_expr_by_type(T_FUN_SYS_WORD_SEGMENT, ft_expr))) {
     } else if (OB_ISNULL(ft_expr) || OB_ISNULL(doc_id_expr)) {
@@ -3684,6 +3694,16 @@ int ObTableScanOp::fetch_next_fts_index_rows()
       } else {
         has_segment_word = true;
       }
+    }
+    if (fts_fetch_timing && 0 != t_scan1) {
+      const int64_t t_fetch1 = ObTimeUtility::current_time();
+      if (t_fetch1 - t_fetch0 > 20000 || 0 == tl_fetch_seq) {
+        LOG_INFO("fts ddl fetch split", "seq", tl_fetch_seq,
+                 "total_us", t_fetch1 - t_fetch0,
+                 "scan_us", t_scan1 - t_fetch0,
+                 "segment_us", t_fetch1 - t_scan1, K(ret));
+      }
+      ++tl_fetch_seq;
     }
   }
   return ret;
