@@ -260,9 +260,14 @@ time_mysql_command() {
   if [ -n "${OBSERVER_PID}" ] && [ -d "/proc/${OBSERVER_PID}" ]; then
     ticks0="$(proc_cpu_ticks "${OBSERVER_PID}")"
   fi
+  # 墙钟锚点：日志里只有毫秒级时间戳，光看 bench 的耗时无法判断时间花在
+  # 「ALTER 发起到算子开跑」还是「算子内部」。两边都记上就能直接对齐。
+  local wall_begin wall_end
+  wall_begin="$(date +%H:%M:%S.%3N)"
   start_ns=$(now_ns)
   mysql_exec "${sql}" >/dev/null
   end_ns=$(now_ns)
+  wall_end="$(date +%H:%M:%S.%3N)"
   if [ -n "${ticks0}" ] && [ -d "/proc/${OBSERVER_PID}" ]; then
     ticks1="$(proc_cpu_ticks "${OBSERVER_PID}")"
     cpu_sec="$(awk -v a="${ticks0}" -v b="${ticks1}" -v hz="${hz}" 'BEGIN { printf "%.3f", (b - a) / hz }')"
@@ -273,7 +278,7 @@ time_mysql_command() {
     cores="$(awk -v c="${cpu_sec}" -v t="${total_sec}" 'BEGIN { if (t > 0) printf "%.2f", c / t; else printf "0" }')"
     METRICS["${name}_cpu_sec"]="${cpu_sec}"
     METRICS["${name}_cores"]="${cores}"
-    log "  ${name}: ${total_sec}s  cpu=${cpu_sec}s cores=${cores}"
+    log "  ${name}: ${total_sec}s  cpu=${cpu_sec}s cores=${cores}  [${wall_begin} -> ${wall_end}]"
   else
     log "  ${name}: ${total_sec}s"
   fi

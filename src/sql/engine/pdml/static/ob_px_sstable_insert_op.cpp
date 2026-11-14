@@ -533,6 +533,12 @@ int ObPxMultiPartSSTableInsertOp::write_ordered_slice_by_row()
   int64_t row_seq = 0;
   while (OB_SUCC(ret) && !is_all_partition_finished_) {
     ++rows_total;
+    // 进入循环的第一行打一个锚点。日志自带毫秒时间戳，把它和 bench 记录的
+    // ALTER 起止时间、以及扫描侧的 seq=0 对齐，就能算出「ALTER 发出到算子开跑」
+    // 和「算子开跑到拿到第一行」各占多少 —— 这两段此前完全没被测量。
+    if (timing_enabled && 1 == rows_total) {
+      LOG_INFO("fts ddl loop start");
+    }
     const bool sampled = timing_enabled && (0 == (row_seq++ & FTS_ROW_TIMING_MASK));
     int64_t t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0;
     if (sampled) {
